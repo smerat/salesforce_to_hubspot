@@ -1,0 +1,33 @@
+{
+  "name": "salesforce-hubspot-migration-worker",
+  "version": "1.0.0",
+  "description": "Migration worker for Salesforce to HubSpot data transfer",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "migrate:contacts": "tsx src/index.ts --object contacts",
+    "migrate:companies": "tsx src/index.ts --object companies",
+    "migrate:deals": "tsx src/index.ts --object deals",
+    "type-check": "tsc --noEmit"
+  },
+  "keywords": ["salesforce", "hubspot", "migration", "etl"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@hubspot/api-client": "^11.0.0",
+    "dotenv": "^16.4.5",
+    "jsforce": "^2.0.0",
+    "pg": "^8.11.3",
+    "pino": "^8.19.0",
+    "pino-pretty": "^11.0.0",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/pg": "^8.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}

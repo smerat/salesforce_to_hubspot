@@ -1,0 +1,25 @@
+# Supabase configuration file
+# For more details: https://supabase.com/docs/guides/cli
+
+[api]
+enabled = true
+port = 54321
+
+[db]
+port = 54322
+
+[studio]
+enabled = true
+port = 54323
+
+[inbucket]
+enabled = false
+
+[storage]
+enabled = false
+
+[auth]
+enabled = false
+
+[functions]
+enabled = false
