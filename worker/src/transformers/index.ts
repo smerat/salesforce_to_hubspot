@@ -1,4 +1,4 @@
-import logger from '../utils/logger';
+import logger from "../utils/logger";
 import {
   SalesforceContact,
   SalesforceAccount,
@@ -9,9 +9,8 @@ import {
   HubSpotDeal,
   ObjectType,
   TransformResult,
-  FieldMapping,
-} from '../types';
-import { objectMappings } from './field-mappings';
+} from "../types";
+import { objectMappings } from "./field-mappings";
 
 class DataTransformer {
   /**
@@ -22,7 +21,8 @@ class DataTransformer {
       const properties: Record<string, any> = {};
 
       for (const mapping of objectMappings.contacts.fields) {
-        const value = sfContact[mapping.salesforceField as keyof SalesforceContact];
+        const value =
+          sfContact[mapping.salesforceField as keyof SalesforceContact];
 
         // Skip if value is null/undefined and field is not required
         if (value == null && !mapping.required) {
@@ -38,16 +38,18 @@ class DataTransformer {
         }
 
         // Apply transformation if provided
-        const transformedValue = mapping.transform ? mapping.transform(value) : value;
+        const transformedValue = mapping.transform
+          ? mapping.transform(value)
+          : value;
         properties[mapping.hubspotField] = transformedValue;
       }
 
       // Add custom Salesforce ID for tracking
-      properties['salesforce_id'] = sfContact.Id;
+      properties["salesforce_id"] = sfContact.Id;
 
       const hubspotContact: HubSpotContact = { properties };
 
-      logger.debug('Transformed contact', {
+      logger.debug("Transformed contact", {
         salesforceId: sfContact.Id,
         email: properties.email,
       });
@@ -57,7 +59,7 @@ class DataTransformer {
         data: hubspotContact,
       };
     } catch (error: any) {
-      logger.error('Failed to transform contact', {
+      logger.error("Failed to transform contact", {
         salesforceId: sfContact.Id,
         error: error.message,
       });
@@ -76,7 +78,8 @@ class DataTransformer {
       const properties: Record<string, any> = {};
 
       for (const mapping of objectMappings.companies.fields) {
-        const value = sfAccount[mapping.salesforceField as keyof SalesforceAccount];
+        const value =
+          sfAccount[mapping.salesforceField as keyof SalesforceAccount];
 
         if (value == null && !mapping.required) {
           continue;
@@ -89,16 +92,18 @@ class DataTransformer {
           };
         }
 
-        const transformedValue = mapping.transform ? mapping.transform(value) : value;
+        const transformedValue = mapping.transform
+          ? mapping.transform(value)
+          : value;
         properties[mapping.hubspotField] = transformedValue;
       }
 
       // Add custom Salesforce ID
-      properties['salesforce_id'] = sfAccount.Id;
+      properties["salesforce_id"] = sfAccount.Id;
 
-      const hubspotCompany: HubSpotCompany = { properties };
+      const hubspotCompany: HubSpotCompany = { properties } as any;
 
-      logger.debug('Transformed company', {
+      logger.debug("Transformed company", {
         salesforceId: sfAccount.Id,
         name: properties.name,
       });
@@ -108,7 +113,7 @@ class DataTransformer {
         data: hubspotCompany,
       };
     } catch (error: any) {
-      logger.error('Failed to transform company', {
+      logger.error("Failed to transform company", {
         salesforceId: sfAccount.Id,
         error: error.message,
       });
@@ -124,13 +129,14 @@ class DataTransformer {
    */
   transformDeal(
     sfOpportunity: SalesforceOpportunity,
-    accountHubSpotId?: string
+    accountHubSpotId?: string,
   ): TransformResult {
     try {
       const properties: Record<string, any> = {};
 
       for (const mapping of objectMappings.deals.fields) {
-        const value = sfOpportunity[mapping.salesforceField as keyof SalesforceOpportunity];
+        const value =
+          sfOpportunity[mapping.salesforceField as keyof SalesforceOpportunity];
 
         if (value == null && !mapping.required) {
           continue;
@@ -143,14 +149,16 @@ class DataTransformer {
           };
         }
 
-        const transformedValue = mapping.transform ? mapping.transform(value) : value;
+        const transformedValue = mapping.transform
+          ? mapping.transform(value)
+          : value;
         properties[mapping.hubspotField] = transformedValue;
       }
 
       // Add custom Salesforce ID
-      properties['salesforce_id'] = sfOpportunity.Id;
+      properties["salesforce_id"] = sfOpportunity.Id;
 
-      const hubspotDeal: HubSpotDeal = { properties };
+      const hubspotDeal: HubSpotDeal = { properties } as any;
 
       // Add association to company if AccountId exists and we have the HubSpot ID
       if (accountHubSpotId) {
@@ -159,7 +167,7 @@ class DataTransformer {
             to: { id: accountHubSpotId },
             types: [
               {
-                associationCategory: 'HUBSPOT_DEFINED',
+                associationCategory: "HUBSPOT_DEFINED",
                 associationTypeId: 341, // Deal to Company association type
               },
             ],
@@ -167,7 +175,7 @@ class DataTransformer {
         ];
       }
 
-      logger.debug('Transformed deal', {
+      logger.debug("Transformed deal", {
         salesforceId: sfOpportunity.Id,
         dealname: properties.dealname,
         hasCompanyAssociation: !!accountHubSpotId,
@@ -178,7 +186,7 @@ class DataTransformer {
         data: hubspotDeal,
       };
     } catch (error: any) {
-      logger.error('Failed to transform deal', {
+      logger.error("Failed to transform deal", {
         salesforceId: sfOpportunity.Id,
         error: error.message,
       });
@@ -195,17 +203,17 @@ class DataTransformer {
   transform(
     objectType: ObjectType,
     record: SalesforceRecord,
-    additionalData?: any
+    additionalData?: any,
   ): TransformResult {
     switch (objectType) {
-      case 'contacts':
+      case "contacts":
         return this.transformContact(record as SalesforceContact);
-      case 'companies':
+      case "companies":
         return this.transformCompany(record as SalesforceAccount);
-      case 'deals':
+      case "deals":
         return this.transformDeal(
           record as SalesforceOpportunity,
-          additionalData?.accountHubSpotId
+          additionalData?.accountHubSpotId,
         );
       default:
         return {
@@ -218,7 +226,10 @@ class DataTransformer {
   /**
    * Validate that a record has all required fields
    */
-  validateRecord(objectType: ObjectType, record: SalesforceRecord): TransformResult {
+  validateRecord(
+    objectType: ObjectType,
+    record: SalesforceRecord,
+  ): TransformResult {
     const mapping = objectMappings[objectType as keyof typeof objectMappings];
 
     if (!mapping) {

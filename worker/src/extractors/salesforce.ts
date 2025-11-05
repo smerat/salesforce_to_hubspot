@@ -1,15 +1,8 @@
-import jsforce from 'jsforce';
-import config from '../config';
-import logger from '../utils/logger';
-import { retry, RateLimiter } from '../utils/retry';
-import {
-  ObjectType,
-  SalesforceContact,
-  SalesforceAccount,
-  SalesforceOpportunity,
-  SalesforceRecord,
-  ExtractResult,
-} from '../types';
+import * as jsforce from "jsforce";
+import config from "../config";
+import logger from "../utils/logger";
+import { retry, RateLimiter } from "../utils/retry";
+import { SalesforceRecord, ExtractResult } from "../types";
 
 class SalesforceExtractor {
   private connection: jsforce.Connection | null = null;
@@ -30,7 +23,7 @@ class SalesforceExtractor {
       return;
     }
 
-    logger.info('Connecting to Salesforce...');
+    logger.info("Connecting to Salesforce...");
 
     this.connection = new jsforce.Connection({
       loginUrl: config.salesforce.loginUrl,
@@ -41,23 +34,23 @@ class SalesforceExtractor {
         async () => {
           await this.connection!.login(
             config.salesforce.username,
-            config.salesforce.password + config.salesforce.securityToken
+            config.salesforce.password + config.salesforce.securityToken,
           );
         },
         {
           maxRetries: config.migration.maxRetries,
           delayMs: 2000,
           exponentialBackoff: true,
-        }
+        },
       );
 
       this.isConnected = true;
-      logger.info('Successfully connected to Salesforce', {
+      logger.info("Successfully connected to Salesforce", {
         instanceUrl: this.connection.instanceUrl,
         organizationId: this.connection.userInfo?.organizationId,
       });
     } catch (error) {
-      logger.error('Failed to connect to Salesforce', { error });
+      logger.error("Failed to connect to Salesforce", { error });
       throw error;
     }
   }
@@ -65,223 +58,86 @@ class SalesforceExtractor {
   /**
    * Get total count of records for an object type
    */
-  async getRecordCount(objectType: ObjectType): Promise<number> {
+  async getRecordCount(soqlObject: string): Promise<number> {
     await this.ensureConnected();
 
-    const soqlObject = this.getSalesforceObjectName(objectType);
     const query = `SELECT COUNT() FROM ${soqlObject}`;
 
     await this.rateLimiter.waitForToken();
 
     try {
       const result = await this.connection!.query(query);
-      logger.info(`Total ${objectType} count: ${result.totalSize}`);
+      logger.info(`Total ${soqlObject} count: ${result.totalSize}`);
       return result.totalSize;
     } catch (error) {
-      logger.error(`Failed to get count for ${objectType}`, { error });
+      logger.error(`Failed to get count for ${soqlObject}`, { error });
       throw error;
     }
   }
 
   /**
-   * Extract contacts from Salesforce
-   */
-  async extractContacts(
-    batchSize: number = 200,
-    lastId?: string
-  ): Promise<ExtractResult> {
-    await this.ensureConnected();
-
-    const fields = [
-      'Id',
-      'FirstName',
-      'LastName',
-      'Email',
-      'Phone',
-      'MobilePhone',
-      'AccountId',
-      'Title',
-      'Department',
-      'MailingStreet',
-      'MailingCity',
-      'MailingState',
-      'MailingPostalCode',
-      'MailingCountry',
-      'CreatedDate',
-      'LastModifiedDate',
-    ];
-
-    let query = `SELECT ${fields.join(', ')} FROM Contact`;
-
-    if (lastId) {
-      query += ` WHERE Id > '${lastId}'`;
-    }
-
-    query += ` ORDER BY Id ASC LIMIT ${batchSize}`;
-
-    await this.rateLimiter.waitForToken();
-
-    try {
-      const result = await this.connection!.query<SalesforceContact>(query);
-      const records = result.records;
-
-      logger.info(`Extracted ${records.length} contacts`, {
-        lastId: records[records.length - 1]?.Id,
-      });
-
-      return {
-        records,
-        hasMore: records.length === batchSize,
-        nextPage: records[records.length - 1]?.Id,
-      };
-    } catch (error) {
-      logger.error('Failed to extract contacts', { error });
-      throw error;
-    }
-  }
-
-  /**
-   * Extract accounts (companies) from Salesforce
-   */
-  async extractAccounts(
-    batchSize: number = 200,
-    lastId?: string
-  ): Promise<ExtractResult> {
-    await this.ensureConnected();
-
-    const fields = [
-      'Id',
-      'Name',
-      'Website',
-      'Phone',
-      'Industry',
-      'NumberOfEmployees',
-      'AnnualRevenue',
-      'Type',
-      'BillingStreet',
-      'BillingCity',
-      'BillingState',
-      'BillingPostalCode',
-      'BillingCountry',
-      'Description',
-      'CreatedDate',
-      'LastModifiedDate',
-    ];
-
-    let query = `SELECT ${fields.join(', ')} FROM Account`;
-
-    if (lastId) {
-      query += ` WHERE Id > '${lastId}'`;
-    }
-
-    query += ` ORDER BY Id ASC LIMIT ${batchSize}`;
-
-    await this.rateLimiter.waitForToken();
-
-    try {
-      const result = await this.connection!.query<SalesforceAccount>(query);
-      const records = result.records;
-
-      logger.info(`Extracted ${records.length} accounts`, {
-        lastId: records[records.length - 1]?.Id,
-      });
-
-      return {
-        records,
-        hasMore: records.length === batchSize,
-        nextPage: records[records.length - 1]?.Id,
-      };
-    } catch (error) {
-      logger.error('Failed to extract accounts', { error });
-      throw error;
-    }
-  }
-
-  /**
-   * Extract opportunities (deals) from Salesforce
-   */
-  async extractOpportunities(
-    batchSize: number = 200,
-    lastId?: string
-  ): Promise<ExtractResult> {
-    await this.ensureConnected();
-
-    const fields = [
-      'Id',
-      'Name',
-      'AccountId',
-      'Amount',
-      'CloseDate',
-      'StageName',
-      'Probability',
-      'Type',
-      'LeadSource',
-      'Description',
-      'CreatedDate',
-      'LastModifiedDate',
-    ];
-
-    let query = `SELECT ${fields.join(', ')} FROM Opportunity`;
-
-    if (lastId) {
-      query += ` WHERE Id > '${lastId}'`;
-    }
-
-    query += ` ORDER BY Id ASC LIMIT ${batchSize}`;
-
-    await this.rateLimiter.waitForToken();
-
-    try {
-      const result = await this.connection!.query<SalesforceOpportunity>(query);
-      const records = result.records;
-
-      logger.info(`Extracted ${records.length} opportunities`, {
-        lastId: records[records.length - 1]?.Id,
-      });
-
-      return {
-        records,
-        hasMore: records.length === batchSize,
-        nextPage: records[records.length - 1]?.Id,
-      };
-    } catch (error) {
-      logger.error('Failed to extract opportunities', { error });
-      throw error;
-    }
-  }
-
-  /**
-   * Generic extract method
+   * Generic extract method - extracts records using SOQL query
    */
   async extract(
-    objectType: ObjectType,
+    soqlObject: string,
+    fields: string[],
     batchSize: number = 200,
-    lastId?: string
+    lastId?: string,
+    whereClause?: string,
   ): Promise<ExtractResult> {
-    switch (objectType) {
-      case 'contacts':
-        return this.extractContacts(batchSize, lastId);
-      case 'companies':
-        return this.extractAccounts(batchSize, lastId);
-      case 'deals':
-        return this.extractOpportunities(batchSize, lastId);
-      default:
-        throw new Error(`Unsupported object type: ${objectType}`);
+    await this.ensureConnected();
+
+    let query = `SELECT ${fields.join(", ")} FROM ${soqlObject}`;
+
+    const conditions: string[] = [];
+    if (lastId) {
+      conditions.push(`Id > '${lastId}'`);
+    }
+    if (whereClause) {
+      conditions.push(whereClause);
+    }
+
+    if (conditions.length > 0) {
+      query += ` WHERE ${conditions.join(" AND ")}`;
+    }
+
+    query += ` ORDER BY Id ASC LIMIT ${batchSize}`;
+
+    await this.rateLimiter.waitForToken();
+
+    try {
+      const result = await this.connection!.query<SalesforceRecord>(query);
+      const records = result.records;
+
+      logger.info(`Extracted ${records.length} ${soqlObject} records`, {
+        lastId: records[records.length - 1]?.Id,
+      });
+
+      return {
+        records,
+        hasMore: records.length === batchSize,
+        nextPage: records[records.length - 1]?.Id,
+      };
+    } catch (error) {
+      logger.error(`Failed to extract ${soqlObject}`, { error });
+      throw error;
     }
   }
 
   /**
-   * Get Salesforce object name from our object type
+   * Extract opportunities with renewal relationships
    */
-  private getSalesforceObjectName(objectType: ObjectType): string {
-    const mapping: Record<ObjectType, string> = {
-      contacts: 'Contact',
-      companies: 'Account',
-      deals: 'Opportunity',
-      activities: 'Task',
-      notes: 'Note',
-    };
-    return mapping[objectType];
+  async extractOpportunitiesWithRenewals(
+    batchSize: number = 200,
+    lastId?: string,
+  ): Promise<ExtractResult> {
+    return this.extract(
+      "Opportunity",
+      ["Id", "renewal_opportunity__c"],
+      batchSize,
+      lastId,
+      "renewal_opportunity__c != null",
+    );
   }
 
   /**
@@ -294,6 +150,13 @@ class SalesforceExtractor {
   }
 
   /**
+   * Get the active connection
+   */
+  getConnection(): jsforce.Connection | null {
+    return this.connection;
+  }
+
+  /**
    * Disconnect from Salesforce
    */
   async disconnect(): Promise<void> {
@@ -301,7 +164,7 @@ class SalesforceExtractor {
       await this.connection.logout();
       this.connection = null;
       this.isConnected = false;
-      logger.info('Disconnected from Salesforce');
+      logger.info("Disconnected from Salesforce");
     }
   }
 }

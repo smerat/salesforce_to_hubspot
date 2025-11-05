@@ -12,13 +12,18 @@
     "migrate:deals": "tsx src/index.ts --object deals",
     "type-check": "tsc --noEmit"
   },
-  "keywords": ["salesforce", "hubspot", "migration", "etl"],
+  "keywords": [
+    "salesforce",
+    "hubspot",
+    "migration",
+    "etl"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
     "@hubspot/api-client": "^11.0.0",
     "dotenv": "^16.4.5",
-    "jsforce": "^2.0.0",
+    "jsforce": "^3.10.8",
     "pg": "^8.11.3",
     "pino": "^8.19.0",
     "pino-pretty": "^11.0.0",

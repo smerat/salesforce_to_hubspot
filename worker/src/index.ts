@@ -1,48 +1,31 @@
 #!/usr/bin/env node
 
-import logger from './utils/logger';
-import migrator from './services/migrator';
-import database from './services/database';
-import { ObjectType } from './types';
+import logger from "./utils/logger";
+import migrator from "./services/migrator";
+import database from "./services/database";
 
 /**
  * Main entry point for the migration worker
+ * Worker runs in passive mode, polling for queued migrations
  */
 async function main() {
-  const args = process.argv.slice(2);
-
-  // Parse command line arguments
-  const command = args[0];
-  const objectArg = args.find((arg) => arg.startsWith('--object='));
-  const runIdArg = args.find((arg) => arg.startsWith('--run-id='));
-
-  logger.info('🔧 Salesforce to HubSpot Migration Worker');
-  logger.info('==========================================');
+  logger.info("🔧 Salesforce to HubSpot Migration Worker");
+  logger.info("==========================================");
+  logger.info("Worker is running in passive mode");
+  logger.info("Waiting for migration tasks from dashboard...");
+  logger.info("");
 
   try {
-    if (command === 'resume' && runIdArg) {
-      // Resume a migration run
-      const runId = runIdArg.split('=')[1];
-      await migrator.resumeMigration(runId);
-    } else if (objectArg) {
-      // Start a new migration for specific object types
-      const objectTypes = objectArg
-        .split('=')[1]
-        .split(',')
-        .map((s) => s.trim()) as ObjectType[];
-
-      logger.info('Starting migration for:', objectTypes);
-      await migrator.startMigration(objectTypes);
-    } else {
-      // Default: migrate all supported object types
-      logger.info('Starting full migration (all object types)');
-      await migrator.startMigration(['companies', 'contacts', 'deals']);
-    }
-
-    logger.info('✅ Migration completed successfully');
-    process.exit(0);
+    // Start polling for queued migrations
+    await migrator.startPolling();
   } catch (error: any) {
-    logger.error('❌ Migration failed:', error);
+    logger.error("❌ Worker failed:", {
+      message: error.message,
+      code: error.code,
+      detail: error.detail,
+      stack: error.stack,
+    });
+    console.error("\nFull error details:", error);
     process.exit(1);
   } finally {
     // Cleanup
@@ -51,15 +34,15 @@ async function main() {
 }
 
 // Handle graceful shutdown
-process.on('SIGINT', async () => {
-  logger.warn('Received SIGINT, stopping migration...');
+process.on("SIGINT", async () => {
+  logger.warn("Received SIGINT, stopping worker...");
   migrator.stop();
   await database.close();
   process.exit(0);
 });
 
-process.on('SIGTERM', async () => {
-  logger.warn('Received SIGTERM, stopping migration...');
+process.on("SIGTERM", async () => {
+  logger.warn("Received SIGTERM, stopping worker...");
   migrator.stop();
   await database.close();
   process.exit(0);
@@ -67,6 +50,6 @@ process.on('SIGTERM', async () => {
 
 // Start the application
 main().catch((error) => {
-  logger.error('Unhandled error:', error);
+  logger.error("Unhandled error:", error);
   process.exit(1);
 });

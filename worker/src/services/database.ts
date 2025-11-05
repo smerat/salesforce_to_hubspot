@@ -1,6 +1,6 @@
-import { Pool, QueryResult } from 'pg';
-import config from '../config';
-import logger from '../utils/logger';
+import { Pool, QueryResult, QueryResultRow } from "pg";
+import config from "../config";
+import logger from "../utils/logger";
 import {
   MigrationRun,
   MigrationProgress,
@@ -10,7 +10,7 @@ import {
   ObjectType,
   MigrationStatus,
   ProgressStatus,
-} from '../types';
+} from "../types";
 
 class DatabaseService {
   private pool: Pool;
@@ -24,42 +24,52 @@ class DatabaseService {
       connectionTimeoutMillis: 10000,
     });
 
-    this.pool.on('error', (err) => {
-      logger.error('Unexpected error on idle client', err);
+    this.pool.on("error", (err) => {
+      logger.error("Unexpected error on idle client", err);
     });
   }
 
-  async query<T>(text: string, params?: any[]): Promise<QueryResult<T>> {
+  async query<T extends QueryResultRow = any>(
+    text: string,
+    params?: any[],
+  ): Promise<QueryResult<T>> {
     const start = Date.now();
     try {
       const result = await this.pool.query<T>(text, params);
       const duration = Date.now() - start;
-      logger.debug('Executed query', { text, duration, rows: result.rowCount });
+      logger.debug("Executed query", { text, duration, rows: result.rowCount });
       return result;
-    } catch (error) {
-      logger.error('Database query error', { text, error });
+    } catch (error: any) {
+      logger.error("Database query error", {
+        text,
+        params,
+        errorMessage: error.message,
+        errorCode: error.code,
+        errorDetail: error.detail,
+        error,
+      });
       throw error;
     }
   }
 
   // Migration Runs
   async createMigrationRun(
-    status: MigrationStatus = 'queued',
+    status: MigrationStatus = "queued",
     config_snapshot?: Record<string, any>,
-    notes?: string
+    notes?: string,
   ): Promise<MigrationRun> {
     const result = await this.query<MigrationRun>(
       `INSERT INTO migration_runs (status, config_snapshot, notes)
        VALUES ($1, $2, $3)
        RETURNING *`,
-      [status, JSON.stringify(config_snapshot), notes]
+      [status, JSON.stringify(config_snapshot), notes],
     );
     return result.rows[0];
   }
 
   async updateMigrationRun(
     runId: string,
-    updates: Partial<Pick<MigrationRun, 'status' | 'completed_at' | 'notes'>>
+    updates: Partial<Pick<MigrationRun, "status" | "completed_at" | "notes">>,
   ): Promise<MigrationRun> {
     const setClauses: string[] = [];
     const values: any[] = [];
@@ -82,26 +92,26 @@ class DatabaseService {
 
     const result = await this.query<MigrationRun>(
       `UPDATE migration_runs
-       SET ${setClauses.join(', ')}
+       SET ${setClauses.join(", ")}
        WHERE id = $${paramIndex}
        RETURNING *`,
-      values
+      values,
     );
     return result.rows[0];
   }
 
   async getMigrationRun(runId: string): Promise<MigrationRun | null> {
     const result = await this.query<MigrationRun>(
-      'SELECT * FROM migration_runs WHERE id = $1',
-      [runId]
+      "SELECT * FROM migration_runs WHERE id = $1",
+      [runId],
     );
     return result.rows[0] || null;
   }
 
   async getQueuedMigrationRuns(): Promise<MigrationRun[]> {
     const result = await this.query<MigrationRun>(
-      'SELECT * FROM migration_runs WHERE status = $1 ORDER BY started_at ASC',
-      ['queued']
+      "SELECT * FROM migration_runs WHERE status = $1 ORDER BY started_at ASC",
+      ["queued"],
     );
     return result.rows;
   }
@@ -110,13 +120,13 @@ class DatabaseService {
   async createMigrationProgress(
     runId: string,
     objectType: ObjectType,
-    status: ProgressStatus = 'pending'
+    status: ProgressStatus = "pending",
   ): Promise<MigrationProgress> {
     const result = await this.query<MigrationProgress>(
       `INSERT INTO migration_progress (run_id, object_type, status)
        VALUES ($1, $2, $3)
        RETURNING *`,
-      [runId, objectType, status]
+      [runId, objectType, status],
     );
     return result.rows[0];
   }
@@ -124,22 +134,22 @@ class DatabaseService {
   async updateMigrationProgress(
     runId: string,
     objectType: ObjectType,
-    updates: Partial<MigrationProgress>
+    updates: Partial<MigrationProgress>,
   ): Promise<MigrationProgress> {
     const setClauses: string[] = [];
     const values: any[] = [];
     let paramIndex = 1;
 
     const allowedFields = [
-      'total_records',
-      'processed_records',
-      'failed_records',
-      'skipped_records',
-      'last_sf_id_processed',
-      'last_sf_modified_date',
-      'status',
-      'started_at',
-      'completed_at',
+      "total_records",
+      "processed_records",
+      "failed_records",
+      "skipped_records",
+      "last_sf_id_processed",
+      "last_sf_modified_date",
+      "status",
+      "started_at",
+      "completed_at",
     ];
 
     for (const field of allowedFields) {
@@ -153,29 +163,29 @@ class DatabaseService {
 
     const result = await this.query<MigrationProgress>(
       `UPDATE migration_progress
-       SET ${setClauses.join(', ')}
+       SET ${setClauses.join(", ")}
        WHERE run_id = $${paramIndex++} AND object_type = $${paramIndex}
        RETURNING *`,
-      values
+      values,
     );
     return result.rows[0];
   }
 
   async getMigrationProgress(
     runId: string,
-    objectType: ObjectType
+    objectType: ObjectType,
   ): Promise<MigrationProgress | null> {
     const result = await this.query<MigrationProgress>(
-      'SELECT * FROM migration_progress WHERE run_id = $1 AND object_type = $2',
-      [runId, objectType]
+      "SELECT * FROM migration_progress WHERE run_id = $1 AND object_type = $2",
+      [runId, objectType],
     );
     return result.rows[0] || null;
   }
 
   async getAllMigrationProgress(runId: string): Promise<MigrationProgress[]> {
     const result = await this.query<MigrationProgress>(
-      'SELECT * FROM migration_progress WHERE run_id = $1 ORDER BY object_type',
-      [runId]
+      "SELECT * FROM migration_progress WHERE run_id = $1 ORDER BY object_type",
+      [runId],
     );
     return result.rows;
   }
@@ -183,26 +193,26 @@ class DatabaseService {
   async incrementProcessedRecords(
     runId: string,
     objectType: ObjectType,
-    count: number = 1
+    count: number = 1,
   ): Promise<void> {
     await this.query(
       `UPDATE migration_progress
        SET processed_records = processed_records + $1
        WHERE run_id = $2 AND object_type = $3`,
-      [count, runId, objectType]
+      [count, runId, objectType],
     );
   }
 
   async incrementFailedRecords(
     runId: string,
     objectType: ObjectType,
-    count: number = 1
+    count: number = 1,
   ): Promise<void> {
     await this.query(
       `UPDATE migration_progress
        SET failed_records = failed_records + $1
        WHERE run_id = $2 AND object_type = $3`,
-      [count, runId, objectType]
+      [count, runId, objectType],
     );
   }
 
@@ -213,7 +223,7 @@ class DatabaseService {
     salesforceType: string,
     hubspotId: string,
     hubspotType: string,
-    metadata?: Record<string, any>
+    metadata?: Record<string, any>,
   ): Promise<IdMapping> {
     const result = await this.query<IdMapping>(
       `INSERT INTO id_mappings (run_id, salesforce_id, salesforce_type, hubspot_id, hubspot_type, metadata)
@@ -221,7 +231,14 @@ class DatabaseService {
        ON CONFLICT (salesforce_id, salesforce_type)
        DO UPDATE SET hubspot_id = $4, metadata = $6, migrated_at = NOW()
        RETURNING *`,
-      [runId, salesforceId, salesforceType, hubspotId, hubspotType, JSON.stringify(metadata)]
+      [
+        runId,
+        salesforceId,
+        salesforceType,
+        hubspotId,
+        hubspotType,
+        JSON.stringify(metadata),
+      ],
     );
     return result.rows[0];
   }
@@ -234,7 +251,7 @@ class DatabaseService {
       hubspotId: string;
       hubspotType: string;
       metadata?: Record<string, any>;
-    }>
+    }>,
   ): Promise<void> {
     if (mappings.length === 0) return;
 
@@ -244,7 +261,7 @@ class DatabaseService {
     mappings.forEach((mapping, index) => {
       const offset = index * 6;
       valuePlaceholders.push(
-        `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6})`
+        `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6})`,
       );
       values.push(
         mapping.runId,
@@ -252,33 +269,33 @@ class DatabaseService {
         mapping.salesforceType,
         mapping.hubspotId,
         mapping.hubspotType,
-        JSON.stringify(mapping.metadata || {})
+        JSON.stringify(mapping.metadata || {}),
       );
     });
 
     await this.query(
       `INSERT INTO id_mappings (run_id, salesforce_id, salesforce_type, hubspot_id, hubspot_type, metadata)
-       VALUES ${valuePlaceholders.join(', ')}
+       VALUES ${valuePlaceholders.join(", ")}
        ON CONFLICT (salesforce_id, salesforce_type)
        DO UPDATE SET hubspot_id = EXCLUDED.hubspot_id, metadata = EXCLUDED.metadata, migrated_at = NOW()`,
-      values
+      values,
     );
   }
 
   async getIdMapping(
     salesforceId: string,
-    salesforceType: string
+    salesforceType: string,
   ): Promise<IdMapping | null> {
     const result = await this.query<IdMapping>(
-      'SELECT * FROM id_mappings WHERE salesforce_id = $1 AND salesforce_type = $2',
-      [salesforceId, salesforceType]
+      "SELECT * FROM id_mappings WHERE salesforce_id = $1 AND salesforce_type = $2",
+      [salesforceId, salesforceType],
     );
     return result.rows[0] || null;
   }
 
   async getHubSpotId(
     salesforceId: string,
-    salesforceType: string
+    salesforceType: string,
   ): Promise<string | null> {
     const mapping = await this.getIdMapping(salesforceId, salesforceType);
     return mapping?.hubspot_id || null;
@@ -291,30 +308,40 @@ class DatabaseService {
     salesforceId: string,
     salesforceType: string,
     error_message: string,
-    error_details?: Record<string, any>
+    error_details?: Record<string, any>,
   ): Promise<MigrationError> {
     const result = await this.query<MigrationError>(
       `INSERT INTO migration_errors (run_id, object_type, salesforce_id, salesforce_type, error_message, error_details)
        VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [runId, objectType, salesforceId, salesforceType, error_message, JSON.stringify(error_details)]
+      [
+        runId,
+        objectType,
+        salesforceId,
+        salesforceType,
+        error_message,
+        JSON.stringify(error_details),
+      ],
     );
     return result.rows[0];
   }
 
   async incrementErrorRetryCount(errorId: string): Promise<void> {
     await this.query(
-      'UPDATE migration_errors SET retry_count = retry_count + 1 WHERE id = $1',
-      [errorId]
+      "UPDATE migration_errors SET retry_count = retry_count + 1 WHERE id = $1",
+      [errorId],
     );
   }
 
-  async getPendingRetryErrors(runId: string, maxRetries: number): Promise<MigrationError[]> {
+  async getPendingRetryErrors(
+    runId: string,
+    maxRetries: number,
+  ): Promise<MigrationError[]> {
     const result = await this.query<MigrationError>(
       `SELECT * FROM migration_errors
        WHERE run_id = $1 AND status = 'pending_retry' AND retry_count < $2
        ORDER BY created_at ASC`,
-      [runId, maxRetries]
+      [runId, maxRetries],
     );
     return result.rows;
   }
@@ -325,13 +352,13 @@ class DatabaseService {
     action: string,
     objectType?: ObjectType,
     recordCount?: number,
-    metadata?: Record<string, any>
+    metadata?: Record<string, any>,
   ): Promise<AuditLog> {
     const result = await this.query<AuditLog>(
       `INSERT INTO audit_log (run_id, action, object_type, record_count, metadata)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [runId, action, objectType, recordCount, JSON.stringify(metadata)]
+      [runId, action, objectType, recordCount, JSON.stringify(metadata)],
     );
     return result.rows[0];
   }
@@ -339,7 +366,7 @@ class DatabaseService {
   // Utility
   async close(): Promise<void> {
     await this.pool.end();
-    logger.info('Database connection pool closed');
+    logger.info("Database connection pool closed");
   }
 }
 

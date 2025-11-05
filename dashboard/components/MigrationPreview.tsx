@@ -1,0 +1,388 @@
+"use client";
+
+import { useState } from "react";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { ReloadIcon, RocketIcon, ArrowLeftIcon } from "@radix-ui/react-icons";
+import { FieldMapping } from "./FieldMapper";
+
+type MigrationType = "account_to_company" | "opportunity_renewal_associations";
+
+interface MigrationPreviewProps {
+  migrationType: MigrationType;
+  fieldMappings: FieldMapping[];
+  onBack: () => void;
+  onConfirm: (testMode?: boolean) => void;
+}
+
+interface PreviewData {
+  totalCount: number;
+  sampleRecords: any[];
+}
+
+export default function MigrationPreview({
+  migrationType,
+  fieldMappings,
+  onBack,
+  onConfirm,
+}: MigrationPreviewProps) {
+  const [previewData, setPreviewData] = useState<PreviewData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function fetchPreview() {
+    setLoading(true);
+    setError(null);
+
+    try {
+      // For opportunity renewal associations, we don't need to fetch preview data
+      if (migrationType === "opportunity_renewal_associations") {
+        const response = await fetch("/api/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            objectName: "Opportunity",
+            fields: ["Id", "renewal_opportunity__c"],
+            limit: 3,
+            whereClause: "renewal_opportunity__c != null",
+          }),
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || "Failed to fetch preview");
+        }
+
+        const data = await response.json();
+        setPreviewData(data);
+      } else {
+        // For account to company migration
+        const sfFields = fieldMappings.map((m) => m.salesforceField);
+
+        const response = await fetch("/api/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            objectName: "Account",
+            fields: sfFields,
+            limit: 3,
+          }),
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || "Failed to fetch preview");
+        }
+
+        const data = await response.json();
+        setPreviewData(data);
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Auto-fetch preview on mount
+  useState(() => {
+    fetchPreview();
+  });
+
+  const estimatedTime = previewData
+    ? Math.ceil((previewData.totalCount / 100) * 0.5) // ~0.5 min per 100 records
+    : 0;
+
+  const isAssociationMigration =
+    migrationType === "opportunity_renewal_associations";
+
+  return (
+    <div className="space-y-6">
+      {/* Summary Card */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Migration Preview</CardTitle>
+          <CardDescription>
+            {isAssociationMigration
+              ? "Review renewal associations that will be created"
+              : "Review what will be migrated"}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          {loading ? (
+            <div className="flex items-center justify-center py-8">
+              <ReloadIcon className="h-8 w-8 animate-spin text-primary" />
+              <span className="ml-3 text-muted-foreground">
+                Loading preview...
+              </span>
+            </div>
+          ) : error ? (
+            <div className="py-8 text-center">
+              <p className="text-red-400">Error: {error}</p>
+              <Button onClick={fetchPreview} className="mt-4" variant="outline">
+                Retry
+              </Button>
+            </div>
+          ) : previewData ? (
+            <>
+              {/* Stats */}
+              {isAssociationMigration ? (
+                <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">
+                      Opportunities with Renewals
+                    </p>
+                    <p className="text-2xl font-bold text-primary">
+                      {previewData.totalCount}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      In Salesforce
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">
+                      Associations to Create
+                    </p>
+                    <p className="text-2xl font-bold text-green-400">
+                      {previewData.totalCount * 2}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Bidirectional in HubSpot
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Est. Time</p>
+                    <p className="text-2xl font-bold">{estimatedTime}</p>
+                    <p className="text-xs text-muted-foreground">Minutes</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Source</p>
+                    <p className="text-2xl font-bold text-primary">
+                      {previewData.totalCount}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Salesforce Accounts
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Destination</p>
+                    <p className="text-2xl font-bold text-green-400">
+                      {previewData.totalCount}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      HubSpot Companies
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Fields</p>
+                    <p className="text-2xl font-bold">{fieldMappings.length}</p>
+                    <p className="text-xs text-muted-foreground">
+                      Will be migrated
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Est. Time</p>
+                    <p className="text-2xl font-bold">{estimatedTime}</p>
+                    <p className="text-xs text-muted-foreground">Minutes</p>
+                  </div>
+                </div>
+              )}
+
+              {/* Field Mappings or Association Details */}
+              {isAssociationMigration ? (
+                <div>
+                  <h3 className="mb-3 font-semibold">Association Details</h3>
+                  <div className="space-y-3 rounded-md border p-4">
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Label</Badge>
+                      <div>
+                        <p className="font-semibold">renewed_in_renewal_of</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Bidirectional association label in HubSpot
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Source</Badge>
+                      <div>
+                        <p className="font-semibold">
+                          Salesforce renewal_opportunity__c
+                        </p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Lookup field on Opportunity object
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Target</Badge>
+                      <div>
+                        <p className="font-semibold">HubSpot Deal-to-Deal</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Associates deals using hs_salesforceopportunityid
+                          property
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <h3 className="mb-3 font-semibold">Field Mappings</h3>
+                  <div className="space-y-1 rounded-md border p-3">
+                    {fieldMappings.map((mapping) => (
+                      <div
+                        key={mapping.salesforceField}
+                        className="flex items-center text-sm"
+                      >
+                        <span className="font-mono text-muted-foreground">
+                          {mapping.salesforceField}
+                        </span>
+                        <span className="mx-2 text-muted-foreground">→</span>
+                        <span className="font-mono">
+                          {mapping.hubspotField}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Sample Data */}
+              {previewData.sampleRecords.length > 0 && (
+                <div>
+                  <h3 className="mb-3 font-semibold">
+                    Sample Data (First {previewData.sampleRecords.length}{" "}
+                    Records)
+                  </h3>
+                  <div className="space-y-4">
+                    {isAssociationMigration
+                      ? previewData.sampleRecords.map((record, idx) => (
+                          <Card key={record.Id}>
+                            <CardHeader className="pb-3">
+                              <CardTitle className="text-base">
+                                Opportunity {idx + 1}
+                              </CardTitle>
+                            </CardHeader>
+                            <CardContent>
+                              <div className="space-y-2">
+                                <div className="flex items-center gap-2">
+                                  <Badge variant="secondary">
+                                    Opportunity ID
+                                  </Badge>
+                                  <span className="font-mono text-sm">
+                                    {record.Id}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <Badge variant="secondary">Renews In</Badge>
+                                  <span className="font-mono text-sm">
+                                    {record.renewal_opportunity__c}
+                                  </span>
+                                </div>
+                                <div className="mt-3 rounded-md bg-muted/50 p-3 text-xs">
+                                  <p className="text-muted-foreground">
+                                    Will create bidirectional association
+                                    between deals with these Salesforce IDs
+                                  </p>
+                                </div>
+                              </div>
+                            </CardContent>
+                          </Card>
+                        ))
+                      : previewData.sampleRecords.map((record, idx) => (
+                          <Card key={record.Id}>
+                            <CardHeader className="pb-3">
+                              <CardTitle className="text-base">
+                                Record {idx + 1}
+                              </CardTitle>
+                            </CardHeader>
+                            <CardContent>
+                              <div className="space-y-2">
+                                {fieldMappings.map((mapping) => {
+                                  const sfValue =
+                                    record[mapping.salesforceField];
+                                  return (
+                                    <div
+                                      key={mapping.salesforceField}
+                                      className="flex items-start border-b border-border/50 pb-2 last:border-0"
+                                    >
+                                      <div className="flex-1">
+                                        <p className="text-xs text-muted-foreground">
+                                          {mapping.salesforceField}
+                                        </p>
+                                        <p className="font-medium">
+                                          {sfValue || (
+                                            <span className="text-muted-foreground">
+                                              null
+                                            </span>
+                                          )}
+                                        </p>
+                                      </div>
+                                      <div className="px-2 text-muted-foreground">
+                                        →
+                                      </div>
+                                      <div className="flex-1">
+                                        <p className="text-xs text-muted-foreground">
+                                          {mapping.hubspotField}
+                                        </p>
+                                        <p className="font-medium">
+                                          {sfValue || (
+                                            <span className="text-muted-foreground">
+                                              null
+                                            </span>
+                                          )}
+                                        </p>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </CardContent>
+                          </Card>
+                        ))}
+                  </div>
+                </div>
+              )}
+            </>
+          ) : null}
+
+          {/* Actions */}
+          <div className="flex justify-between">
+            <Button onClick={onBack} variant="outline">
+              <ArrowLeftIcon className="mr-2 h-4 w-4" />
+              Back to Field Mapping
+            </Button>
+            <div className="flex gap-3">
+              <Button
+                onClick={() => onConfirm(true)}
+                size="lg"
+                variant="outline"
+                disabled={loading || !!error}
+              >
+                Test Migration (5 records)
+              </Button>
+              <Button
+                onClick={() => onConfirm(false)}
+                size="lg"
+                disabled={loading || !!error}
+              >
+                <RocketIcon className="mr-2 h-4 w-4" />
+                Start Full Migration
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}

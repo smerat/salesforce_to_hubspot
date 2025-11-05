@@ -1,14 +1,8 @@
-import { Client } from '@hubspot/api-client';
-import config from '../config';
-import logger from '../utils/logger';
-import { retry, RateLimiter } from '../utils/retry';
-import {
-  HubSpotContact,
-  HubSpotCompany,
-  HubSpotDeal,
-  BatchLoadResult,
-  ObjectType,
-} from '../types';
+import { Client } from "@hubspot/api-client";
+import config from "../config";
+import logger from "../utils/logger";
+import { retry, RateLimiter } from "../utils/retry";
+import { BatchLoadResult } from "../types";
 
 class HubSpotLoader {
   private client: Client;
@@ -25,49 +19,13 @@ class HubSpotLoader {
   }
 
   /**
-   * Create a single contact in HubSpot
+   * Generic batch create for any HubSpot object
    */
-  async createContact(contact: HubSpotContact): Promise<string> {
-    await this.rateLimiter.waitForToken();
-
-    try {
-      const result = await retry(
-        async () => {
-          return await this.client.crm.contacts.basicApi.create({
-            properties: contact.properties,
-            associations: [],
-          });
-        },
-        {
-          maxRetries: config.migration.maxRetries,
-          delayMs: 1000,
-          exponentialBackoff: true,
-          onRetry: (error, attempt) => {
-            logger.warn(`Retry creating contact (attempt ${attempt})`, {
-              error: error.message,
-            });
-          },
-        }
-      );
-
-      logger.debug('Created contact in HubSpot', { id: result.id });
-      return result.id;
-    } catch (error: any) {
-      logger.error('Failed to create contact in HubSpot', {
-        error: error.message,
-        contact,
-      });
-      throw error;
-    }
-  }
-
-  /**
-   * Batch create contacts in HubSpot
-   */
-  async batchCreateContacts(
-    contacts: Array<{ salesforceId: string; data: HubSpotContact }>
+  async batchCreate(
+    objectType: string,
+    records: Array<{ salesforceId: string; properties: Record<string, any> }>,
   ): Promise<BatchLoadResult> {
-    if (contacts.length === 0) {
+    if (records.length === 0) {
       return { successful: [], failed: [] };
     }
 
@@ -78,58 +36,58 @@ class HubSpotLoader {
 
     // HubSpot batch API supports up to 100 records
     const batchSize = 100;
-    const batches = this.chunkArray(contacts, batchSize);
+    const batches = this.chunkArray(records, batchSize);
 
     for (const batch of batches) {
       try {
-        const inputs = batch.map((c) => ({
-          properties: c.data.properties,
+        const inputs = batch.map((r) => ({
+          properties: r.properties,
         }));
 
         const result = await retry(
           async () => {
-            return await this.client.crm.contacts.batchApi.create({
+            return await (this.client.crm as any)[objectType].batchApi.create({
               inputs,
             });
           },
           {
             maxRetries: config.migration.maxRetries,
             delayMs: 1000,
-          }
+          },
         );
 
-        // Map results back to Salesforce IDs
-        result.results.forEach((hubspotContact, index) => {
+        result.results.forEach((hubspotRecord: any, index: number) => {
           successful.push({
             salesforceId: batch[index].salesforceId,
-            hubspotId: hubspotContact.id,
+            hubspotId: hubspotRecord.id,
           });
         });
 
-        logger.info(`Batch created ${result.results.length} contacts in HubSpot`);
+        logger.info(
+          `Batch created ${result.results.length} ${objectType} in HubSpot`,
+        );
       } catch (error: any) {
-        // If batch fails, try individual creates
-        logger.warn('Batch create failed, trying individual creates', {
-          error: error.message,
-        });
+        console.error("=== BATCH CREATE ERROR ===");
+        console.error("Message:", error.message);
+        console.error("Status:", error.code);
+        console.error("Body:", JSON.stringify(error.body, null, 2));
+        console.error("Full Error:", error);
+        console.error("========================");
 
-        for (const contact of batch) {
-          try {
-            const hubspotId = await this.createContact(contact.data);
-            successful.push({
-              salesforceId: contact.salesforceId,
-              hubspotId,
-            });
-          } catch (individualError: any) {
-            failed.push({
-              salesforceId: contact.salesforceId,
-              error: individualError.message,
-            });
-          }
-        }
+        logger.error(
+          "Batch create failed - stopping migration for troubleshooting",
+          {
+            error: error.message,
+            body: error.body,
+            statusCode: error.code,
+            batchSize: batch.length,
+          },
+        );
+
+        // Stop the entire migration - don't fall back to individual creates
+        throw error;
       }
 
-      // Small delay between batches
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
 
@@ -137,16 +95,19 @@ class HubSpotLoader {
   }
 
   /**
-   * Create a single company in HubSpot
+   * Create a single record in HubSpot
    */
-  async createCompany(company: HubSpotCompany): Promise<string> {
+  async createSingle(
+    objectType: string,
+    properties: Record<string, any>,
+  ): Promise<string> {
     await this.rateLimiter.waitForToken();
 
     try {
       const result = await retry(
         async () => {
-          return await this.client.crm.companies.basicApi.create({
-            properties: company.properties,
+          return await (this.client.crm as any)[objectType].basicApi.create({
+            properties,
             associations: [],
           });
         },
@@ -154,242 +115,217 @@ class HubSpotLoader {
           maxRetries: config.migration.maxRetries,
           delayMs: 1000,
           exponentialBackoff: true,
-        }
+        },
       );
 
-      logger.debug('Created company in HubSpot', { id: result.id });
+      logger.debug(`Created ${objectType} in HubSpot`, { id: result.id });
       return result.id;
     } catch (error: any) {
-      logger.error('Failed to create company in HubSpot', {
+      logger.error(`Failed to create ${objectType} in HubSpot`, {
         error: error.message,
-        company,
+        body: error.body,
+        statusCode: error.code,
+        properties,
       });
       throw error;
     }
   }
 
   /**
-   * Batch create companies in HubSpot
+   * Search for deals by property value
    */
-  async batchCreateCompanies(
-    companies: Array<{ salesforceId: string; data: HubSpotCompany }>
-  ): Promise<BatchLoadResult> {
-    if (companies.length === 0) {
-      return { successful: [], failed: [] };
-    }
-
-    await this.rateLimiter.waitForToken();
-
-    const successful: Array<{ salesforceId: string; hubspotId: string }> = [];
-    const failed: Array<{ salesforceId: string; error: string }> = [];
-
-    const batchSize = 100;
-    const batches = this.chunkArray(companies, batchSize);
-
-    for (const batch of batches) {
-      try {
-        const inputs = batch.map((c) => ({
-          properties: c.data.properties,
-        }));
-
-        const result = await retry(
-          async () => {
-            return await this.client.crm.companies.batchApi.create({
-              inputs,
-            });
-          },
-          {
-            maxRetries: config.migration.maxRetries,
-            delayMs: 1000,
-          }
-        );
-
-        result.results.forEach((hubspotCompany, index) => {
-          successful.push({
-            salesforceId: batch[index].salesforceId,
-            hubspotId: hubspotCompany.id,
-          });
-        });
-
-        logger.info(`Batch created ${result.results.length} companies in HubSpot`);
-      } catch (error: any) {
-        logger.warn('Batch create failed, trying individual creates', {
-          error: error.message,
-        });
-
-        for (const company of batch) {
-          try {
-            const hubspotId = await this.createCompany(company.data);
-            successful.push({
-              salesforceId: company.salesforceId,
-              hubspotId,
-            });
-          } catch (individualError: any) {
-            failed.push({
-              salesforceId: company.salesforceId,
-              error: individualError.message,
-            });
-          }
-        }
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-
-    return { successful, failed };
-  }
-
-  /**
-   * Create a single deal in HubSpot
-   */
-  async createDeal(deal: HubSpotDeal): Promise<string> {
+  async searchDealsByProperty(
+    propertyName: string,
+    propertyValue: string,
+  ): Promise<string | null> {
     await this.rateLimiter.waitForToken();
 
     try {
       const result = await retry(
         async () => {
-          return await this.client.crm.deals.basicApi.create({
-            properties: deal.properties,
-            associations: deal.associations || [],
-          });
+          return await this.client.crm.deals.searchApi.doSearch({
+            filterGroups: [
+              {
+                filters: [
+                  {
+                    propertyName,
+                    operator: "EQ" as any,
+                    value: propertyValue,
+                  },
+                ],
+              },
+            ],
+            properties: [propertyName],
+            limit: 1,
+            after: 0,
+            sorts: [],
+          } as any);
         },
         {
           maxRetries: config.migration.maxRetries,
           delayMs: 1000,
-          exponentialBackoff: true,
-        }
+        },
       );
 
-      logger.debug('Created deal in HubSpot', { id: result.id });
-      return result.id;
+      if (result.results && result.results.length > 0) {
+        logger.debug("Found deal by property", {
+          propertyName,
+          propertyValue,
+          dealId: result.results[0].id,
+        });
+        return result.results[0].id;
+      }
+
+      logger.debug("No deal found with property", {
+        propertyName,
+        propertyValue,
+      });
+      return null;
     } catch (error: any) {
-      logger.error('Failed to create deal in HubSpot', {
+      logger.error("Failed to search deals by property", {
         error: error.message,
-        deal,
+        propertyName,
+        propertyValue,
       });
       throw error;
     }
   }
 
   /**
-   * Batch create deals in HubSpot
+   * Get association label IDs for deal-to-deal associations
    */
-  async batchCreateDeals(
-    deals: Array<{ salesforceId: string; data: HubSpotDeal }>
-  ): Promise<BatchLoadResult> {
-    if (deals.length === 0) {
-      return { successful: [], failed: [] };
-    }
-
+  async getDealAssociationLabelIds(
+    labelName: string,
+  ): Promise<{ forward: number; reverse: number } | null> {
     await this.rateLimiter.waitForToken();
 
-    const successful: Array<{ salesforceId: string; hubspotId: string }> = [];
-    const failed: Array<{ salesforceId: string; error: string }> = [];
+    try {
+      const result = await retry(
+        async () => {
+          return await this.client.crm.associations.v4.schema.definitionsApi.getAll(
+            "deals",
+            "deals",
+          );
+        },
+        {
+          maxRetries: config.migration.maxRetries,
+          delayMs: 1000,
+        },
+      );
 
-    const batchSize = 100;
-    const batches = this.chunkArray(deals, batchSize);
+      logger.info("All deal-to-deal associations retrieved", {
+        count: result.results.length,
+        labels: result.results.map((r: any) => ({
+          typeId: r.typeId,
+          label: r.label,
+        })),
+      });
 
-    for (const batch of batches) {
-      try {
-        const inputs = batch.map((d) => ({
-          properties: d.data.properties,
-          associations: d.data.associations || [],
-        }));
+      // For bidirectional associations, HubSpot returns two separate entries
+      // We need to find both "Renewed In" and "Renewal of" labels
+      const renewedInLabel: any = result.results.find(
+        (label: any) =>
+          label.label?.toLowerCase() === "renewed in" &&
+          label.category === "USER_DEFINED",
+      );
 
-        const result = await retry(
-          async () => {
-            return await this.client.crm.deals.batchApi.create({
-              inputs,
-            });
+      const renewalOfLabel: any = result.results.find(
+        (label: any) =>
+          label.label?.toLowerCase() === "renewal of" &&
+          label.category === "USER_DEFINED",
+      );
+
+      if (renewedInLabel && renewalOfLabel) {
+        logger.info("Found bidirectional association labels", {
+          renewedIn: {
+            typeId: renewedInLabel.typeId,
+            label: renewedInLabel.label,
           },
-          {
-            maxRetries: config.migration.maxRetries,
-            delayMs: 1000,
-          }
-        );
-
-        result.results.forEach((hubspotDeal, index) => {
-          successful.push({
-            salesforceId: batch[index].salesforceId,
-            hubspotId: hubspotDeal.id,
-          });
+          renewalOf: {
+            typeId: renewalOfLabel.typeId,
+            label: renewalOfLabel.label,
+          },
         });
 
-        logger.info(`Batch created ${result.results.length} deals in HubSpot`);
-      } catch (error: any) {
-        logger.warn('Batch create failed, trying individual creates', {
-          error: error.message,
-        });
-
-        for (const deal of batch) {
-          try {
-            const hubspotId = await this.createDeal(deal.data);
-            successful.push({
-              salesforceId: deal.salesforceId,
-              hubspotId,
-            });
-          } catch (individualError: any) {
-            failed.push({
-              salesforceId: deal.salesforceId,
-              error: individualError.message,
-            });
-          }
-        }
+        return {
+          forward: parseInt(renewedInLabel.typeId),
+          reverse: parseInt(renewalOfLabel.typeId),
+        };
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      logger.warn("Association labels not found", {
+        labelName,
+        availableLabels: result.results.map((r: any) => r.label),
+        foundRenewedIn: !!renewedInLabel,
+        foundRenewalOf: !!renewalOfLabel,
+      });
+      return null;
+    } catch (error: any) {
+      logger.error("Failed to get association label IDs", {
+        error: error.message,
+        labelName,
+      });
+      throw error;
     }
-
-    return { successful, failed };
   }
 
   /**
-   * Create association between two HubSpot objects
+   * Create association between two HubSpot objects using v4 API
    */
   async createAssociation(
     fromObjectType: string,
     fromObjectId: string,
     toObjectType: string,
     toObjectId: string,
-    associationTypeId: number
+    associationTypeId: number,
   ): Promise<void> {
     await this.rateLimiter.waitForToken();
 
     try {
       await retry(
         async () => {
-          await this.client.crm.associations.batchApi.create(
+          // Use v4 basic API to create association
+          await this.client.crm.associations.v4.basicApi.create(
             fromObjectType as any,
+            fromObjectId,
             toObjectType as any,
-            {
-              inputs: [
-                {
-                  from: { id: fromObjectId },
-                  to: { id: toObjectId },
-                  type: associationTypeId,
-                },
-              ],
-            }
+            toObjectId,
+            [
+              {
+                associationCategory: "USER_DEFINED",
+                associationTypeId: associationTypeId,
+              },
+            ] as any,
           );
         },
         {
           maxRetries: config.migration.maxRetries,
           delayMs: 1000,
-        }
+        },
       );
 
-      logger.debug('Created association in HubSpot', {
+      logger.debug("Created association in HubSpot", {
         from: `${fromObjectType}:${fromObjectId}`,
         to: `${toObjectType}:${toObjectId}`,
+        associationTypeId,
       });
     } catch (error: any) {
-      logger.error('Failed to create association in HubSpot', {
+      logger.error("Failed to create association in HubSpot", {
         error: error.message,
+        errorBody: error.body,
+        errorCode: error.code,
         fromObjectType,
         fromObjectId,
         toObjectType,
         toObjectId,
+        associationTypeId,
       });
+
+      console.error("=== ASSOCIATION ERROR DETAILS ===");
+      console.error("Error:", error);
+      console.error("Body:", JSON.stringify(error.body, null, 2));
+      console.error("=================================");
+
       throw error;
     }
   }

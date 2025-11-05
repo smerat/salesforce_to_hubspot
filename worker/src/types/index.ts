@@ -1,12 +1,23 @@
 // Common types for the migration worker
 
-export type ObjectType = 'contacts' | 'companies' | 'deals' | 'activities' | 'notes';
+export type ObjectType =
+  | "contacts"
+  | "companies"
+  | "deals"
+  | "activities"
+  | "notes"
+  | "deal_associations";
 
-export type MigrationStatus = 'queued' | 'running' | 'completed' | 'failed' | 'paused';
+export type MigrationStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "paused";
 
-export type ProgressStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
+export type ProgressStatus = "pending" | "in_progress" | "completed" | "failed";
 
-export type ErrorStatus = 'pending_retry' | 'failed' | 'resolved' | 'skipped';
+export type ErrorStatus = "pending_retry" | "failed" | "resolved" | "skipped";
 
 export interface MigrationRun {
   id: string;
