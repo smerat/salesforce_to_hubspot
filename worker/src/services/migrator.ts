@@ -94,6 +94,12 @@ class Migrator {
         await this.migratePilotOpportunityAssociations(testMode, testModeLimit);
       } else if (migrationType === "event_to_meeting_migration") {
         await this.migrateEventsToMeetings(testMode, testModeLimit);
+      } else if (migrationType === "opportunity_product_dates") {
+        await this.migrateOpportunityProductDates(testMode, testModeLimit);
+      } else if (migrationType === "sync_deal_contract_dates") {
+        await this.syncDealContractDates(testMode, testModeLimit);
+      } else if (migrationType === "opportunity_line_item_dates") {
+        await this.migrateOpportunityLineItemDates(testMode, testModeLimit);
       } else {
         throw new Error(`Unknown migration type: ${migrationType}`);
       }
@@ -1439,6 +1445,849 @@ class Migrator {
       );
     } catch (error: any) {
       logger.error("❌ Failed to migrate Events to Meetings", {
+        error: error.message,
+      });
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "failed",
+        completed_at: new Date(),
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * Migrate Opportunity Product Dates from Line Item Schedules
+   * This is a Salesforce-only migration that updates Opportunity fields
+   */
+  private async migrateOpportunityProductDates(
+    testMode: boolean = false,
+    testModeLimit: number = 5,
+  ): Promise<void> {
+    if (!this.runId) {
+      throw new Error("No active migration run");
+    }
+
+    const objectType: ObjectType = "opportunity_product_dates";
+
+    logger.info("📦 Starting Opportunity Product Dates migration");
+
+    try {
+      // Create progress tracking
+      await database.createMigrationProgress(
+        this.runId,
+        objectType,
+        "in_progress",
+      );
+      await database.updateMigrationProgress(this.runId, objectType, {
+        started_at: new Date(),
+      });
+
+      // Get total count of opportunities
+      const totalRecords =
+        await salesforceExtractor.getRecordCount("Opportunity");
+      const recordsToMigrate = testMode
+        ? Math.min(testModeLimit, totalRecords)
+        : totalRecords;
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        total_records: recordsToMigrate,
+      });
+
+      if (testMode) {
+        logger.info(
+          `🧪 TEST MODE: Will process ${recordsToMigrate} of ${totalRecords} total Opportunities`,
+        );
+      } else {
+        logger.info(`Total Opportunities to process: ${totalRecords}`);
+      }
+
+      let lastId: string | undefined;
+      let processedCount = 0;
+      let successCount = 0;
+      let failedCount = 0;
+      let hasMore = true;
+
+      while (hasMore && !this.shouldStop) {
+        // In test mode, stop if we've reached the limit
+        if (testMode && processedCount >= testModeLimit) {
+          logger.info(
+            `🧪 TEST MODE: Reached limit of ${testModeLimit} records, stopping`,
+          );
+          break;
+        }
+
+        // Calculate batch size (respect test mode limit)
+        const batchSize = testMode
+          ? Math.min(config.migration.batchSize, testModeLimit - processedCount)
+          : config.migration.batchSize;
+
+        // Extract batch of Opportunities from Salesforce
+        const extractResult = await salesforceExtractor.extract(
+          "Opportunity",
+          ["Id", "Name", "Product_Start_Date__c", "Product_End_Date__c"],
+          batchSize,
+          lastId,
+        );
+
+        logger.info(
+          `Extracted ${extractResult.records.length} Opportunities from Salesforce`,
+        );
+
+        if (extractResult.records.length === 0) {
+          break;
+        }
+
+        // In test mode, limit the records we process
+        const recordsToProcess = testMode
+          ? extractResult.records.slice(0, testModeLimit - processedCount)
+          : extractResult.records;
+
+        // Extract opportunity IDs for this batch
+        const opportunityIds = recordsToProcess.map((opp) => opp.Id);
+
+        // Get all Line Item Schedules for these opportunities
+        const schedulesByOpp =
+          await salesforceExtractor.extractLineItemSchedulesByOpportunity(
+            opportunityIds,
+          );
+
+        logger.info(
+          `Found Line Item Schedules for ${schedulesByOpp.size} out of ${recordsToProcess.length} opportunities`,
+        );
+
+        // Log which opportunities were found/not found
+        logger.info("Opportunities in this batch:");
+        for (const opp of recordsToProcess) {
+          const hasSchedules = schedulesByOpp.has(opp.Id);
+          const scheduleCount = hasSchedules
+            ? schedulesByOpp.get(opp.Id)!.length
+            : 0;
+          logger.info(`  ${hasSchedules ? "✓" : "✗"} ${opp.Name || opp.Id}`, {
+            opportunityId: opp.Id,
+            hasLineItemSchedules: hasSchedules,
+            scheduleCount: scheduleCount,
+          });
+        }
+
+        // Prepare updates for opportunities that have schedules
+        const opportunityUpdates: Array<{
+          Id: string;
+          Product_Start_Date__c: string;
+          Product_End_Date__c: string;
+        }> = [];
+
+        for (const opportunity of recordsToProcess) {
+          if (this.shouldStop) break;
+
+          const opportunityId = opportunity.Id;
+          const schedules = schedulesByOpp.get(opportunityId);
+
+          if (!schedules || schedules.length === 0) {
+            logger.debug("No Line Item Schedules found for opportunity", {
+              opportunityId,
+              opportunityName: opportunity.Name,
+            });
+            continue;
+          }
+
+          // Find min and max ScheduleDate
+          const scheduleDates = schedules
+            .map((s) => new Date(s.ScheduleDate))
+            .filter((d) => !isNaN(d.getTime())); // Filter out invalid dates
+
+          if (scheduleDates.length === 0) {
+            logger.warn("No valid ScheduleDates found for opportunity", {
+              opportunityId,
+              scheduleCount: schedules.length,
+            });
+            continue;
+          }
+
+          const minDate = new Date(
+            Math.min(...scheduleDates.map((d) => d.getTime())),
+          );
+          const maxDate = new Date(
+            Math.max(...scheduleDates.map((d) => d.getTime())),
+          );
+
+          // Format dates as YYYY-MM-DD for Salesforce
+          const productStartDate = minDate.toISOString().split("T")[0];
+          const productEndDate = maxDate.toISOString().split("T")[0];
+
+          logger.info("✓ Calculated product dates for opportunity", {
+            opportunityId,
+            opportunityName: opportunity.Name,
+            scheduleCount: schedules.length,
+            productStartDate,
+            productEndDate,
+            currentStartDate: opportunity.Product_Start_Date__c || "Not Set",
+            currentEndDate: opportunity.Product_End_Date__c || "Not Set",
+          });
+
+          opportunityUpdates.push({
+            Id: opportunityId,
+            Product_Start_Date__c: productStartDate,
+            Product_End_Date__c: productEndDate,
+          });
+        }
+
+        // Show summary of what will be updated
+        logger.info(
+          `Opportunities with Line Item Schedules: ${opportunityUpdates.length} out of ${recordsToProcess.length}`,
+        );
+
+        // Batch update opportunities in Salesforce
+        if (opportunityUpdates.length > 0) {
+          logger.info(
+            `Updating ${opportunityUpdates.length} opportunities with product dates`,
+          );
+
+          const updateResult =
+            await salesforceExtractor.batchUpdateOpportunities(
+              opportunityUpdates,
+            );
+
+          successCount += updateResult.successful.length;
+          failedCount += updateResult.failed.length;
+
+          logger.info("Batch update completed", {
+            successful: updateResult.successful.length,
+            failed: updateResult.failed.length,
+          });
+
+          // Log successful updates
+          if (updateResult.successful.length > 0) {
+            logger.info(
+              `✅ Successfully updated ${updateResult.successful.length} Opportunities in this batch`,
+            );
+          }
+
+          // Log errors for failed updates
+          for (const failed of updateResult.failed) {
+            logger.error(`❌ Failed to update Opportunity: ${failed.id}`, {
+              error: failed.error,
+            });
+
+            await database.createMigrationError(
+              this.runId,
+              objectType,
+              failed.id,
+              "Opportunity",
+              `Failed to update: ${failed.error}`,
+            );
+          }
+
+          if (updateResult.failed.length > 0) {
+            await database.incrementFailedRecords(
+              this.runId,
+              objectType,
+              updateResult.failed.length,
+            );
+          }
+        }
+
+        // Update progress
+        processedCount += recordsToProcess.length;
+        lastId = extractResult.nextPage;
+        hasMore =
+          extractResult.hasMore &&
+          (!testMode || processedCount < testModeLimit);
+
+        await database.updateMigrationProgress(this.runId, objectType, {
+          processed_records: processedCount,
+          last_sf_id_processed: lastId,
+        });
+
+        logger.info(
+          `Progress: ${processedCount}/${recordsToMigrate} Opportunities processed (${successCount} updated, ${failedCount} failed)`,
+        );
+      }
+
+      // Update final counts
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "completed",
+        completed_at: new Date(),
+        failed_records: failedCount,
+      });
+
+      await database.createAuditLog(
+        this.runId,
+        "object_migration_completed",
+        objectType,
+        processedCount,
+        {
+          successCount,
+          failedCount,
+        },
+      );
+
+      logger.info(
+        `✅ Completed Opportunity Product Dates migration: ${processedCount} opportunities processed (${successCount} updated, ${failedCount} failed)`,
+      );
+    } catch (error: any) {
+      logger.error("❌ Failed to migrate Opportunity Product Dates", {
+        error: error.message,
+      });
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "failed",
+        completed_at: new Date(),
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * Sync Opportunity dates to HubSpot Deal contract dates
+   */
+  private async syncDealContractDates(
+    testMode: boolean = false,
+    testModeLimit: number = 5,
+  ): Promise<void> {
+    if (!this.runId) {
+      throw new Error("No active migration run");
+    }
+
+    const objectType: ObjectType = "sync_deal_contract_dates";
+
+    logger.info("📦 Starting Sync Deal Contract Dates migration");
+
+    try {
+      // Create progress tracking
+      await database.createMigrationProgress(
+        this.runId,
+        objectType,
+        "in_progress",
+      );
+      await database.updateMigrationProgress(this.runId, objectType, {
+        started_at: new Date(),
+      });
+
+      // Connect to Salesforce
+      await salesforceExtractor.connect();
+
+      // Get total count of opportunities
+      const totalRecords =
+        await salesforceExtractor.getRecordCount("Opportunity");
+      const recordsToMigrate = testMode
+        ? Math.min(testModeLimit, totalRecords)
+        : totalRecords;
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        total_records: recordsToMigrate,
+      });
+
+      if (testMode) {
+        logger.info(
+          `🧪 TEST MODE: Will process ${recordsToMigrate} of ${totalRecords} total Opportunities`,
+        );
+      } else {
+        logger.info(`Total Opportunities to process: ${totalRecords}`);
+      }
+
+      let lastId: string | undefined;
+      let processedCount = 0;
+      let successCount = 0;
+      let failedCount = 0;
+      let skippedCount = 0;
+      let hasMore = true;
+
+      while (hasMore && !this.shouldStop) {
+        // In test mode, stop if we've reached the limit
+        if (testMode && processedCount >= testModeLimit) {
+          logger.info(
+            `🧪 TEST MODE: Reached limit of ${testModeLimit} records, stopping`,
+          );
+          break;
+        }
+
+        // Calculate batch size (respect test mode limit)
+        const batchSize = testMode
+          ? Math.min(config.migration.batchSize, testModeLimit - processedCount)
+          : config.migration.batchSize;
+
+        // Extract batch of Opportunities from Salesforce
+        const extractResult = await salesforceExtractor.extract(
+          "Opportunity",
+          [
+            "Id",
+            "Name",
+            "Product_Start_Date__c",
+            "Product_End_Date__c",
+            "CloseDate",
+          ],
+          batchSize,
+          lastId,
+        );
+
+        logger.info(
+          `Extracted ${extractResult.records.length} Opportunities from Salesforce`,
+        );
+
+        if (extractResult.records.length === 0) {
+          break;
+        }
+
+        // In test mode, limit the records we process
+        const recordsToProcess = testMode
+          ? extractResult.records.slice(0, testModeLimit - processedCount)
+          : extractResult.records;
+
+        // Prepare updates for HubSpot deals
+        const dealUpdates: Array<{
+          dealId: string;
+          opportunityId: string;
+          opportunityName: string;
+          properties: Record<string, any>;
+        }> = [];
+
+        for (const opportunity of recordsToProcess) {
+          if (this.shouldStop) break;
+
+          const opportunityId = opportunity.Id;
+          const opportunityName = opportunity.Name || "Unnamed";
+
+          // Find the corresponding HubSpot deal
+          const dealId = await hubspotLoader.searchDealsByProperty(
+            "hs_salesforceopportunityid",
+            opportunityId,
+          );
+
+          if (!dealId) {
+            logger.warn("No HubSpot deal found for Opportunity", {
+              opportunityId,
+              opportunityName,
+            });
+            skippedCount++;
+            continue;
+          }
+
+          // Calculate contract_start_date
+          let contractStartDate: string;
+          if (opportunity.Product_Start_Date__c) {
+            contractStartDate = opportunity.Product_Start_Date__c;
+          } else if (opportunity.CloseDate) {
+            contractStartDate = opportunity.CloseDate;
+            logger.debug("Using CloseDate as contract start", {
+              opportunityId,
+              closeDate: opportunity.CloseDate,
+            });
+          } else {
+            logger.warn("No start date or CloseDate available", {
+              opportunityId,
+              opportunityName,
+            });
+            skippedCount++;
+            continue;
+          }
+
+          // Calculate contract_end_date
+          let contractEndDate: string;
+          if (opportunity.Product_End_Date__c) {
+            // Add 1 month to Product_End_Date__c
+            const productEndDate = new Date(opportunity.Product_End_Date__c);
+            const endDate = new Date(productEndDate);
+            endDate.setMonth(endDate.getMonth() + 1);
+            contractEndDate = endDate.toISOString().split("T")[0];
+            logger.debug(
+              "Calculated end date as Product_End_Date__c + 1 month",
+              {
+                opportunityId,
+                productEndDate: opportunity.Product_End_Date__c,
+                contractEndDate,
+              },
+            );
+          } else {
+            // Add 1 year to contract_start_date
+            const startDate = new Date(contractStartDate);
+            const endDate = new Date(startDate);
+            endDate.setFullYear(endDate.getFullYear() + 1);
+            contractEndDate = endDate.toISOString().split("T")[0];
+            logger.debug(
+              "Calculated end date as start + 1 year (no product end date)",
+              {
+                opportunityId,
+                contractStartDate,
+                contractEndDate,
+              },
+            );
+          }
+
+          logger.info("Calculated contract dates for opportunity", {
+            opportunityId,
+            opportunityName,
+            dealId,
+            contractStartDate,
+            contractEndDate,
+          });
+
+          dealUpdates.push({
+            dealId,
+            opportunityId,
+            opportunityName,
+            properties: {
+              contract_start_date: contractStartDate,
+              contract_end_date: contractEndDate,
+            },
+          });
+        }
+
+        // Batch update deals in HubSpot
+        if (dealUpdates.length > 0) {
+          logger.info(`Updating ${dealUpdates.length} deals in HubSpot`);
+
+          const updateResult = await hubspotLoader.batchUpdateDeals(
+            dealUpdates.map((u) => ({
+              dealId: u.dealId,
+              properties: u.properties,
+            })),
+          );
+
+          successCount += updateResult.successful.length;
+          failedCount += updateResult.failed.length;
+
+          logger.info("Batch update completed", {
+            successful: updateResult.successful.length,
+            failed: updateResult.failed.length,
+          });
+
+          // Log successful updates
+          if (updateResult.successful.length > 0) {
+            logger.info(
+              `✅ Successfully updated ${updateResult.successful.length} deals in this batch`,
+            );
+          }
+
+          // Log errors for failed updates
+          for (const failed of updateResult.failed) {
+            const dealUpdate = dealUpdates.find((u) => u.dealId === failed.id);
+            logger.error(`❌ Failed to update deal: ${failed.id}`, {
+              error: failed.error,
+              opportunityId: dealUpdate?.opportunityId,
+            });
+
+            await database.createMigrationError(
+              this.runId,
+              objectType,
+              dealUpdate?.opportunityId || failed.id,
+              "Opportunity",
+              `Failed to update deal: ${failed.error}`,
+            );
+          }
+
+          if (updateResult.failed.length > 0) {
+            await database.incrementFailedRecords(
+              this.runId,
+              objectType,
+              updateResult.failed.length,
+            );
+          }
+        }
+
+        // Update progress
+        processedCount += recordsToProcess.length;
+        lastId = extractResult.nextPage;
+        hasMore =
+          extractResult.hasMore &&
+          (!testMode || processedCount < testModeLimit);
+
+        await database.updateMigrationProgress(this.runId, objectType, {
+          processed_records: processedCount,
+          skipped_records: skippedCount,
+          last_sf_id_processed: lastId,
+        });
+
+        logger.info(
+          `Progress: ${processedCount}/${recordsToMigrate} Opportunities processed (${successCount} deals updated, ${skippedCount} skipped, ${failedCount} failed)`,
+        );
+      }
+
+      // Update final counts
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "completed",
+        completed_at: new Date(),
+        failed_records: failedCount,
+        skipped_records: skippedCount,
+      });
+
+      await database.createAuditLog(
+        this.runId,
+        "object_migration_completed",
+        objectType,
+        processedCount,
+        {
+          successCount,
+          failedCount,
+          skippedCount,
+        },
+      );
+
+      logger.info(
+        `✅ Completed Sync Deal Contract Dates migration: ${processedCount} opportunities processed (${successCount} deals updated, ${skippedCount} skipped, ${failedCount} failed)`,
+      );
+    } catch (error: any) {
+      logger.error("❌ Failed to sync deal contract dates", {
+        error: error.message,
+      });
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "failed",
+        completed_at: new Date(),
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * Migrate OpportunityLineItem dates from Line Item Schedules
+   * This is a Salesforce-only migration that updates OpportunityLineItem fields
+   */
+  private async migrateOpportunityLineItemDates(
+    testMode: boolean = false,
+    testModeLimit: number = 5,
+  ): Promise<void> {
+    if (!this.runId) {
+      throw new Error("No active migration run");
+    }
+
+    const objectType: ObjectType = "opportunity_line_item_dates";
+
+    logger.info("📦 Starting OpportunityLineItem Dates migration");
+
+    try {
+      // Create progress tracking
+      await database.createMigrationProgress(
+        this.runId,
+        objectType,
+        "in_progress",
+      );
+      await database.updateMigrationProgress(this.runId, objectType, {
+        started_at: new Date(),
+      });
+
+      // Get total count of opportunity line items
+      const totalRecords = await salesforceExtractor.getRecordCount(
+        "OpportunityLineItem",
+      );
+      const recordsToMigrate = testMode
+        ? Math.min(testModeLimit, totalRecords)
+        : totalRecords;
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        total_records: recordsToMigrate,
+      });
+
+      if (testMode) {
+        logger.info(
+          `🧪 TEST MODE: Will process ${recordsToMigrate} of ${totalRecords} total OpportunityLineItems`,
+        );
+      } else {
+        logger.info(`Total OpportunityLineItems to process: ${totalRecords}`);
+      }
+
+      let lastId: string | undefined;
+      let processedCount = 0;
+      let successCount = 0;
+      let failedCount = 0;
+      let hasMore = true;
+
+      while (hasMore && !this.shouldStop) {
+        // In test mode, stop if we've reached the limit
+        if (testMode && processedCount >= testModeLimit) {
+          logger.info(
+            `🧪 TEST MODE: Reached limit of ${testModeLimit} records, stopping`,
+          );
+          break;
+        }
+
+        // Calculate batch size (respect test mode limit)
+        const batchSize = testMode
+          ? Math.min(config.migration.batchSize, testModeLimit - processedCount)
+          : config.migration.batchSize;
+
+        // Extract batch of OpportunityLineItems from Salesforce
+        const extractResult = await salesforceExtractor.extract(
+          "OpportunityLineItem",
+          ["Id", "Name", "Start_Date__c", "End_Date__c"],
+          batchSize,
+          lastId,
+        );
+
+        logger.info(
+          `Extracted ${extractResult.records.length} OpportunityLineItems from Salesforce`,
+        );
+
+        if (extractResult.records.length === 0) {
+          break;
+        }
+
+        // In test mode, limit the records we process
+        const recordsToProcess = testMode
+          ? extractResult.records.slice(0, testModeLimit - processedCount)
+          : extractResult.records;
+
+        // Extract line item IDs for this batch
+        const lineItemIds = recordsToProcess.map((li) => li.Id);
+
+        // Get all Line Item Schedules for these line items
+        const schedulesByLineItem =
+          await salesforceExtractor.extractLineItemSchedulesByLineItem(
+            lineItemIds,
+          );
+
+        logger.info(
+          `Found Line Item Schedules for ${schedulesByLineItem.size} out of ${recordsToProcess.length} line items`,
+        );
+
+        // Prepare updates for line items that have schedules
+        const lineItemUpdates: Array<{
+          Id: string;
+          Start_Date__c: string;
+          End_Date__c: string;
+        }> = [];
+
+        for (const lineItem of recordsToProcess) {
+          if (this.shouldStop) break;
+
+          const lineItemId = lineItem.Id;
+          const schedules = schedulesByLineItem.get(lineItemId);
+
+          if (!schedules || schedules.length === 0) {
+            logger.debug("No Line Item Schedules found for line item", {
+              lineItemId,
+              lineItemName: lineItem.Name,
+            });
+            continue;
+          }
+
+          // Find min and max ScheduleDate
+          const scheduleDates = schedules
+            .map((s) => new Date(s.ScheduleDate))
+            .filter((d) => !isNaN(d.getTime())); // Filter out invalid dates
+
+          if (scheduleDates.length === 0) {
+            logger.warn("No valid ScheduleDates found for line item", {
+              lineItemId,
+              scheduleCount: schedules.length,
+            });
+            continue;
+          }
+
+          const minDate = new Date(
+            Math.min(...scheduleDates.map((d) => d.getTime())),
+          );
+          const maxDate = new Date(
+            Math.max(...scheduleDates.map((d) => d.getTime())),
+          );
+
+          // Format dates as YYYY-MM-DD for Salesforce
+          const startDate = minDate.toISOString().split("T")[0];
+          const endDate = maxDate.toISOString().split("T")[0];
+
+          logger.debug("Calculated dates for line item", {
+            lineItemId,
+            lineItemName: lineItem.Name,
+            scheduleCount: schedules.length,
+            startDate,
+            endDate,
+          });
+
+          lineItemUpdates.push({
+            Id: lineItemId,
+            Start_Date__c: startDate,
+            End_Date__c: endDate,
+          });
+        }
+
+        // Batch update line items in Salesforce
+        if (lineItemUpdates.length > 0) {
+          logger.info(
+            `Updating ${lineItemUpdates.length} line items with dates`,
+          );
+
+          const updateResult =
+            await salesforceExtractor.batchUpdateOpportunityLineItems(
+              lineItemUpdates,
+            );
+
+          successCount += updateResult.successful.length;
+          failedCount += updateResult.failed.length;
+
+          logger.info("Batch update completed", {
+            successful: updateResult.successful.length,
+            failed: updateResult.failed.length,
+          });
+
+          if (updateResult.successful.length > 0) {
+            logger.info(
+              `✅ Successfully updated ${updateResult.successful.length} OpportunityLineItems in this batch`,
+            );
+          }
+
+          // Log errors for failed updates
+          for (const failed of updateResult.failed) {
+            await database.createMigrationError(
+              this.runId,
+              objectType,
+              failed.id,
+              "OpportunityLineItem",
+              `Failed to update: ${failed.error}`,
+            );
+          }
+
+          if (updateResult.failed.length > 0) {
+            await database.incrementFailedRecords(
+              this.runId,
+              objectType,
+              updateResult.failed.length,
+            );
+          }
+        }
+
+        // Update progress
+        processedCount += recordsToProcess.length;
+        lastId = extractResult.nextPage;
+        hasMore =
+          extractResult.hasMore &&
+          (!testMode || processedCount < testModeLimit);
+
+        await database.updateMigrationProgress(this.runId, objectType, {
+          processed_records: processedCount,
+          last_sf_id_processed: lastId,
+        });
+
+        logger.info(
+          `Progress: ${processedCount}/${recordsToMigrate} OpportunityLineItems processed (${successCount} updated, ${failedCount} failed)`,
+        );
+      }
+
+      // Update final counts
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "completed",
+        completed_at: new Date(),
+        failed_records: failedCount,
+      });
+
+      await database.createAuditLog(
+        this.runId,
+        "object_migration_completed",
+        objectType,
+        processedCount,
+        {
+          successCount,
+          failedCount,
+        },
+      );
+
+      logger.info(
+        `✅ Completed OpportunityLineItem Dates migration: ${processedCount} line items processed (${successCount} updated, ${failedCount} failed)`,
+      );
+    } catch (error: any) {
+      logger.error("❌ Failed to migrate OpportunityLineItem Dates", {
         error: error.message,
       });
 

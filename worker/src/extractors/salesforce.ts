@@ -273,6 +273,277 @@ class SalesforceExtractor {
   }
 
   /**
+   * Extract Line Item Schedules grouped by OpportunityLineItem
+   * Returns a map of OpportunityLineItemId -> Array of Line Item Schedules
+   */
+  async extractLineItemSchedulesByLineItem(
+    lineItemIds: string[],
+  ): Promise<Map<string, any[]>> {
+    await this.ensureConnected();
+
+    if (lineItemIds.length === 0) {
+      return new Map();
+    }
+
+    // Build query with IN clause for line item IDs
+    const idsForQuery = lineItemIds.map((id) => `'${id}'`).join(", ");
+    const query = `SELECT Id, OpportunityLineItemId, ScheduleDate, Revenue, Quantity
+                   FROM OpportunityLineItemSchedule
+                   WHERE OpportunityLineItemId IN (${idsForQuery})
+                   ORDER BY OpportunityLineItemId, ScheduleDate ASC`;
+
+    await this.rateLimiter.waitForToken();
+
+    try {
+      const result = await this.connection!.query<SalesforceRecord>(query);
+      const schedulesByLineItem = new Map<string, any[]>();
+
+      // Group schedules by line item
+      for (const schedule of result.records) {
+        const lineItemId = schedule.OpportunityLineItemId;
+        if (!schedulesByLineItem.has(lineItemId)) {
+          schedulesByLineItem.set(lineItemId, []);
+        }
+        schedulesByLineItem.get(lineItemId)!.push(schedule);
+      }
+
+      logger.info(
+        `Extracted ${result.records.length} Line Item Schedules for ${schedulesByLineItem.size} line items`,
+      );
+
+      return schedulesByLineItem;
+    } catch (error) {
+      logger.error("Failed to extract Line Item Schedules by line item", {
+        error,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Extract Line Item Schedules grouped by Opportunity
+   * Returns a map of OpportunityId -> Array of Line Item Schedules
+   */
+  async extractLineItemSchedulesByOpportunity(
+    opportunityIds: string[],
+  ): Promise<Map<string, any[]>> {
+    await this.ensureConnected();
+
+    if (opportunityIds.length === 0) {
+      return new Map();
+    }
+
+    // Build query with IN clause for opportunity IDs
+    const idsForQuery = opportunityIds.map((id) => `'${id}'`).join(", ");
+    const query = `SELECT Id, psi_Opportunity__c, ScheduleDate, Revenue, Quantity
+                   FROM OpportunityLineItemSchedule
+                   WHERE psi_Opportunity__c IN (${idsForQuery})
+                   ORDER BY psi_Opportunity__c, ScheduleDate ASC`;
+
+    await this.rateLimiter.waitForToken();
+
+    try {
+      const result = await this.connection!.query<SalesforceRecord>(query);
+      const schedulesByOpp = new Map<string, any[]>();
+
+      // Group schedules by opportunity
+      for (const schedule of result.records) {
+        const oppId = schedule.psi_Opportunity__c;
+        if (!schedulesByOpp.has(oppId)) {
+          schedulesByOpp.set(oppId, []);
+        }
+        schedulesByOpp.get(oppId)!.push(schedule);
+      }
+
+      logger.info(
+        `Extracted ${result.records.length} Line Item Schedules for ${schedulesByOpp.size} opportunities`,
+      );
+
+      return schedulesByOpp;
+    } catch (error) {
+      logger.error("Failed to extract Line Item Schedules", { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Update Opportunity fields
+   */
+  async updateOpportunity(
+    opportunityId: string,
+    updates: Partial<SalesforceRecord>,
+  ): Promise<void> {
+    await this.ensureConnected();
+    await this.rateLimiter.waitForToken();
+
+    try {
+      await this.connection!.sobject("Opportunity").update({
+        Id: opportunityId,
+        ...updates,
+      });
+
+      logger.debug("Updated Opportunity", {
+        opportunityId,
+        fields: Object.keys(updates),
+      });
+    } catch (error: any) {
+      logger.error("Failed to update Opportunity", {
+        opportunityId,
+        error: error.message,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Batch update Opportunities
+   */
+  async batchUpdateOpportunities(
+    updates: Array<{ Id: string } & Partial<SalesforceRecord>>,
+  ): Promise<{
+    successful: string[];
+    failed: Array<{ id: string; error: string }>;
+  }> {
+    await this.ensureConnected();
+
+    if (updates.length === 0) {
+      return { successful: [], failed: [] };
+    }
+
+    const successful: string[] = [];
+    const failed: Array<{ id: string; error: string }> = [];
+
+    // Salesforce allows up to 200 records per batch update
+    const batchSize = 200;
+    const batches = this.chunkArray(updates, batchSize);
+
+    for (const batch of batches) {
+      await this.rateLimiter.waitForToken();
+
+      try {
+        const results =
+          await this.connection!.sobject("Opportunity").update(batch);
+
+        // Handle results array
+        const resultsArray = Array.isArray(results) ? results : [results];
+
+        resultsArray.forEach((result: any, index: number) => {
+          if (result.success) {
+            successful.push(batch[index].Id);
+          } else {
+            failed.push({
+              id: batch[index].Id,
+              error: result.errors?.[0]?.message || "Unknown error",
+            });
+          }
+        });
+
+        logger.info(`Batch updated ${successful.length} Opportunities`, {
+          batchSize: batch.length,
+        });
+      } catch (error: any) {
+        logger.error("Batch update failed", {
+          error: error.message,
+          batchSize: batch.length,
+        });
+
+        // Mark all records in this batch as failed
+        batch.forEach((record) => {
+          failed.push({
+            id: record.Id,
+            error: error.message,
+          });
+        });
+      }
+
+      // Small delay between batches
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    return { successful, failed };
+  }
+
+  /**
+   * Batch update OpportunityLineItems
+   */
+  async batchUpdateOpportunityLineItems(
+    updates: Array<{ Id: string } & Partial<SalesforceRecord>>,
+  ): Promise<{
+    successful: string[];
+    failed: Array<{ id: string; error: string }>;
+  }> {
+    await this.ensureConnected();
+
+    if (updates.length === 0) {
+      return { successful: [], failed: [] };
+    }
+
+    const successful: string[] = [];
+    const failed: Array<{ id: string; error: string }> = [];
+
+    // Salesforce allows up to 200 records per batch update
+    const batchSize = 200;
+    const batches = this.chunkArray(updates, batchSize);
+
+    for (const batch of batches) {
+      await this.rateLimiter.waitForToken();
+
+      try {
+        const results = await this.connection!.sobject(
+          "OpportunityLineItem",
+        ).update(batch);
+
+        // Handle results array
+        const resultsArray = Array.isArray(results) ? results : [results];
+
+        resultsArray.forEach((result: any, index: number) => {
+          if (result.success) {
+            successful.push(batch[index].Id);
+          } else {
+            failed.push({
+              id: batch[index].Id,
+              error: result.errors?.[0]?.message || "Unknown error",
+            });
+          }
+        });
+
+        logger.info(`Batch updated ${successful.length} OpportunityLineItems`, {
+          batchSize: batch.length,
+        });
+      } catch (error: any) {
+        logger.error("Batch update failed", {
+          error: error.message,
+          batchSize: batch.length,
+        });
+
+        // Mark all records in this batch as failed
+        batch.forEach((record) => {
+          failed.push({
+            id: record.Id,
+            error: error.message,
+          });
+        });
+      }
+
+      // Small delay between batches
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    return { successful, failed };
+  }
+
+  /**
+   * Helper to chunk array into smaller batches
+   */
+  private chunkArray<T>(array: T[], size: number): T[][] {
+    const chunks: T[][] = [];
+    for (let i = 0; i < array.length; i += size) {
+      chunks.push(array.slice(i, i + size));
+    }
+    return chunks;
+  }
+
+  /**
    * Ensure connection is established
    */
   private async ensureConnected(): Promise<void> {

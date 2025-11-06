@@ -18,7 +18,10 @@ type Step = "select" | "mapping" | "preview";
 type MigrationType =
   | "account_to_company"
   | "opportunity_renewal_associations"
-  | "pilot_opportunity_associations";
+  | "pilot_opportunity_associations"
+  | "opportunity_product_dates"
+  | "sync_deal_contract_dates"
+  | "opportunity_line_item_dates";
 
 export default function MigratePage() {
   const router = useRouter();
@@ -81,6 +84,12 @@ export default function MigratePage() {
         return "Opportunity Renewal Associations migration";
       case "pilot_opportunity_associations":
         return "Pilot Opportunity Associations migration";
+      case "opportunity_product_dates":
+        return "Opportunity Product Dates migration";
+      case "sync_deal_contract_dates":
+        return "Sync Deal Contract Dates migration";
+      case "opportunity_line_item_dates":
+        return "OpportunityLineItem Dates migration";
       default:
         return "Migration";
     }
@@ -195,6 +204,56 @@ export default function MigratePage() {
                   <p className="mt-1 text-sm text-muted-foreground">
                     Create deal-to-deal associations for pilot opportunities
                     based on Salesforce Pilot_Opportunity__c field
+                  </p>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setMigrationType("opportunity_product_dates");
+                    setStep("preview");
+                  }}
+                  className="w-full rounded-lg border-2 border-border bg-background p-6 text-left transition-all hover:border-primary/50 hover:bg-primary/5"
+                >
+                  <h3 className="text-lg font-semibold">
+                    Opportunity Product Dates (Salesforce Only)
+                  </h3>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Update Opportunity Product_Start_Date__c and
+                    Product_End_Date__c from Line Item Schedule dates
+                    (psi_Opportunity__c)
+                  </p>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setMigrationType("sync_deal_contract_dates");
+                    setStep("preview");
+                  }}
+                  className="w-full rounded-lg border-2 border-border bg-background p-6 text-left transition-all hover:border-primary/50 hover:bg-primary/5"
+                >
+                  <h3 className="text-lg font-semibold">
+                    Sync Deal Contract Dates
+                  </h3>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Sync Salesforce Opportunity dates to HubSpot Deal contract
+                    dates (contract_end_date = Product_End_Date__c + 1 month,
+                    uses CloseDate as fallback)
+                  </p>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setMigrationType("opportunity_line_item_dates");
+                    setStep("preview");
+                  }}
+                  className="w-full rounded-lg border-2 border-border bg-background p-6 text-left transition-all hover:border-primary/50 hover:bg-primary/5"
+                >
+                  <h3 className="text-lg font-semibold">
+                    OpportunityLineItem Dates (Salesforce Only)
+                  </h3>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Update OpportunityLineItem Start_Date__c and End_Date__c
+                    from Line Item Schedule dates (OpportunityLineItemId lookup)
                   </p>
                 </button>
               </div>

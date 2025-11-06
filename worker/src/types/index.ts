@@ -6,7 +6,10 @@ export type ObjectType =
   | "deals"
   | "activities"
   | "notes"
-  | "deal_associations";
+  | "deal_associations"
+  | "opportunity_product_dates"
+  | "sync_deal_contract_dates"
+  | "opportunity_line_item_dates";
 
 export type MigrationStatus =
   | "queued"
@@ -133,6 +136,16 @@ export interface SalesforceOpportunity extends SalesforceRecord {
   Description?: string;
   CreatedDate: string;
   LastModifiedDate: string;
+  Product_Start_Date__c?: string;
+  Product_End_Date__c?: string;
+}
+
+export interface SalesforceOpportunityLineItemSchedule
+  extends SalesforceRecord {
+  psi_Opportunity__c: string;
+  ScheduleDate: string;
+  Revenue?: number;
+  Quantity?: number;
 }
 
 // HubSpot types

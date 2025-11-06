@@ -494,6 +494,110 @@ class HubSpotLoader {
   }
 
   /**
+   * Update a single deal's properties
+   */
+  async updateDeal(
+    dealId: string,
+    properties: Record<string, any>,
+  ): Promise<void> {
+    await this.rateLimiter.waitForToken();
+
+    try {
+      await retry(
+        async () => {
+          return await this.client.crm.deals.basicApi.update(dealId, {
+            properties,
+          });
+        },
+        {
+          maxRetries: config.migration.maxRetries,
+          delayMs: 1000,
+        },
+      );
+
+      logger.debug("Updated deal in HubSpot", { dealId, properties });
+    } catch (error: any) {
+      logger.error("Failed to update deal in HubSpot", {
+        error: error.message,
+        dealId,
+        properties,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Batch update deals
+   */
+  async batchUpdateDeals(
+    updates: Array<{ dealId: string; properties: Record<string, any> }>,
+  ): Promise<{
+    successful: string[];
+    failed: Array<{ id: string; error: string }>;
+  }> {
+    if (updates.length === 0) {
+      return { successful: [], failed: [] };
+    }
+
+    const successful: string[] = [];
+    const failed: Array<{ id: string; error: string }> = [];
+
+    // HubSpot allows up to 100 records per batch update
+    const batchSize = 100;
+    const batches = this.chunkArray(updates, batchSize);
+
+    for (const batch of batches) {
+      await this.rateLimiter.waitForToken();
+
+      try {
+        const inputs = batch.map((u) => ({
+          id: u.dealId,
+          properties: u.properties,
+        }));
+
+        const result = await retry(
+          async () => {
+            return await this.client.crm.deals.batchApi.update({ inputs });
+          },
+          {
+            maxRetries: config.migration.maxRetries,
+            delayMs: 1000,
+          },
+        );
+
+        result.results.forEach((hubspotRecord: any, index: number) => {
+          successful.push(batch[index].dealId);
+        });
+
+        logger.info(`Batch updated ${result.results.length} deals in HubSpot`);
+      } catch (error: any) {
+        logger.error("Batch update deals failed", {
+          error: error.message,
+          batchSize: batch.length,
+        });
+
+        // Try individual updates for this batch
+        for (const update of batch) {
+          try {
+            await this.updateDeal(update.dealId, update.properties);
+            successful.push(update.dealId);
+          } catch (individualError: any) {
+            failed.push({
+              id: update.dealId,
+              error: individualError.message,
+            });
+          }
+        }
+      }
+
+      // Small delay between batches
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    return { successful, failed };
+  }
+
+  /**
    * Helper to chunk array into smaller batches
    */
   private chunkArray<T>(array: T[], size: number): T[][] {
