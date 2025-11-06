@@ -222,42 +222,58 @@ class HubSpotLoader {
       });
 
       // For bidirectional associations, HubSpot returns two separate entries
-      // We need to find both "Renewed In" and "Renewal of" labels
-      const renewedInLabel: any = result.results.find(
+      // Determine which labels to look for based on the labelName parameter
+      let forwardLabelText: string;
+      let reverseLabelText: string;
+
+      if (labelName === "renewed_in_renewal_of") {
+        forwardLabelText = "renewed in";
+        reverseLabelText = "renewal of";
+      } else if (labelName === "has_pilot_pilot_for") {
+        forwardLabelText = "has pilot";
+        reverseLabelText = "pilot for";
+      } else {
+        logger.error("Unknown association label name", { labelName });
+        return null;
+      }
+
+      const forwardLabel: any = result.results.find(
         (label: any) =>
-          label.label?.toLowerCase() === "renewed in" &&
+          label.label?.toLowerCase() === forwardLabelText &&
           label.category === "USER_DEFINED",
       );
 
-      const renewalOfLabel: any = result.results.find(
+      const reverseLabel: any = result.results.find(
         (label: any) =>
-          label.label?.toLowerCase() === "renewal of" &&
+          label.label?.toLowerCase() === reverseLabelText &&
           label.category === "USER_DEFINED",
       );
 
-      if (renewedInLabel && renewalOfLabel) {
+      if (forwardLabel && reverseLabel) {
         logger.info("Found bidirectional association labels", {
-          renewedIn: {
-            typeId: renewedInLabel.typeId,
-            label: renewedInLabel.label,
+          forward: {
+            typeId: forwardLabel.typeId,
+            label: forwardLabel.label,
           },
-          renewalOf: {
-            typeId: renewalOfLabel.typeId,
-            label: renewalOfLabel.label,
+          reverse: {
+            typeId: reverseLabel.typeId,
+            label: reverseLabel.label,
           },
         });
 
         return {
-          forward: parseInt(renewedInLabel.typeId),
-          reverse: parseInt(renewalOfLabel.typeId),
+          forward: parseInt(forwardLabel.typeId),
+          reverse: parseInt(reverseLabel.typeId),
         };
       }
 
       logger.warn("Association labels not found", {
         labelName,
+        forwardLabelText,
+        reverseLabelText,
         availableLabels: result.results.map((r: any) => r.label),
-        foundRenewedIn: !!renewedInLabel,
-        foundRenewalOf: !!renewalOfLabel,
+        foundForward: !!forwardLabel,
+        foundReverse: !!reverseLabel,
       });
       return null;
     } catch (error: any) {
@@ -326,6 +342,153 @@ class HubSpotLoader {
       console.error("Body:", JSON.stringify(error.body, null, 2));
       console.error("=================================");
 
+      throw error;
+    }
+  }
+
+  /**
+   * Create a Meeting engagement in HubSpot
+   */
+  async createMeeting(properties: Record<string, any>): Promise<string> {
+    await this.rateLimiter.waitForToken();
+
+    try {
+      const result = await retry(
+        async () => {
+          return await this.client.crm.objects.meetings.basicApi.create({
+            properties,
+            associations: [],
+          });
+        },
+        {
+          maxRetries: config.migration.maxRetries,
+          delayMs: 1000,
+        },
+      );
+
+      logger.debug("Created meeting in HubSpot", { meetingId: result.id });
+      return result.id;
+    } catch (error: any) {
+      logger.error("Failed to create meeting", {
+        error: error.message,
+        properties,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Create an Email engagement in HubSpot
+   */
+  async createEmail(properties: Record<string, any>): Promise<string> {
+    await this.rateLimiter.waitForToken();
+
+    try {
+      const result = await retry(
+        async () => {
+          return await this.client.crm.objects.emails.basicApi.create({
+            properties,
+            associations: [],
+          });
+        },
+        {
+          maxRetries: config.migration.maxRetries,
+          delayMs: 1000,
+        },
+      );
+
+      logger.debug("Created email in HubSpot", { emailId: result.id });
+      return result.id;
+    } catch (error: any) {
+      logger.error("Failed to create email", {
+        error: error.message,
+        properties,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Create a Call engagement in HubSpot
+   */
+  async createCall(properties: Record<string, any>): Promise<string> {
+    await this.rateLimiter.waitForToken();
+
+    try {
+      const result = await retry(
+        async () => {
+          return await this.client.crm.objects.calls.basicApi.create({
+            properties,
+            associations: [],
+          });
+        },
+        {
+          maxRetries: config.migration.maxRetries,
+          delayMs: 1000,
+        },
+      );
+
+      logger.debug("Created call in HubSpot", { callId: result.id });
+      return result.id;
+    } catch (error: any) {
+      logger.error("Failed to create call", {
+        error: error.message,
+        properties,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Create association between engagement and CRM object
+   */
+  async createEngagementAssociation(
+    fromObjectType: string, // 'meetings', 'emails', 'calls'
+    fromObjectId: string,
+    toObjectType: string, // 'contacts', 'companies', 'deals'
+    toObjectId: string,
+    associationTypeId: number,
+  ): Promise<void> {
+    await this.rateLimiter.waitForToken();
+
+    try {
+      await retry(
+        async () => {
+          await this.client.crm.associations.v4.basicApi.create(
+            fromObjectType as any,
+            fromObjectId,
+            toObjectType as any,
+            toObjectId,
+            [
+              {
+                associationCategory: "HUBSPOT_DEFINED",
+                associationTypeId: associationTypeId,
+              },
+            ] as any,
+          );
+        },
+        {
+          maxRetries: config.migration.maxRetries,
+          delayMs: 1000,
+        },
+      );
+
+      logger.debug("Created engagement association", {
+        fromObjectType,
+        fromObjectId,
+        toObjectType,
+        toObjectId,
+        associationTypeId,
+      });
+    } catch (error: any) {
+      logger.error("Failed to create engagement association", {
+        error: error.message,
+        fromObjectType,
+        fromObjectId,
+        toObjectType,
+        toObjectId,
+        associationTypeId,
+      });
       throw error;
     }
   }

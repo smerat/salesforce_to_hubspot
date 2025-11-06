@@ -15,7 +15,10 @@ import MigrationPreview from "@/components/MigrationPreview";
 import { supabase } from "@/lib/supabase";
 
 type Step = "select" | "mapping" | "preview";
-type MigrationType = "account_to_company" | "opportunity_renewal_associations";
+type MigrationType =
+  | "account_to_company"
+  | "opportunity_renewal_associations"
+  | "pilot_opportunity_associations";
 
 export default function MigratePage() {
   const router = useRouter();
@@ -76,6 +79,8 @@ export default function MigratePage() {
         return "Account to Company migration";
       case "opportunity_renewal_associations":
         return "Opportunity Renewal Associations migration";
+      case "pilot_opportunity_associations":
+        return "Pilot Opportunity Associations migration";
       default:
         return "Migration";
     }
@@ -174,6 +179,22 @@ export default function MigratePage() {
                   <p className="mt-1 text-sm text-muted-foreground">
                     Create deal-to-deal associations for renewal opportunities
                     based on Salesforce renewal_opportunity__c field
+                  </p>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setMigrationType("pilot_opportunity_associations");
+                    setStep("preview");
+                  }}
+                  className="w-full rounded-lg border-2 border-border bg-background p-6 text-left transition-all hover:border-primary/50 hover:bg-primary/5"
+                >
+                  <h3 className="text-lg font-semibold">
+                    Pilot Opportunity Associations
+                  </h3>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Create deal-to-deal associations for pilot opportunities
+                    based on Salesforce Pilot_Opportunity__c field
                   </p>
                 </button>
               </div>

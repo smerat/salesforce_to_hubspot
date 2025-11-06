@@ -13,7 +13,10 @@ import { Badge } from "@/components/ui/badge";
 import { ReloadIcon, RocketIcon, ArrowLeftIcon } from "@radix-ui/react-icons";
 import { FieldMapping } from "./FieldMapper";
 
-type MigrationType = "account_to_company" | "opportunity_renewal_associations";
+type MigrationType =
+  | "account_to_company"
+  | "opportunity_renewal_associations"
+  | "pilot_opportunity_associations";
 
 interface MigrationPreviewProps {
   migrationType: MigrationType;
@@ -42,7 +45,7 @@ export default function MigrationPreview({
     setError(null);
 
     try {
-      // For opportunity renewal associations, we don't need to fetch preview data
+      // For opportunity renewal associations
       if (migrationType === "opportunity_renewal_associations") {
         const response = await fetch("/api/preview", {
           method: "POST",
@@ -52,6 +55,26 @@ export default function MigrationPreview({
             fields: ["Id", "renewal_opportunity__c"],
             limit: 3,
             whereClause: "renewal_opportunity__c != null",
+          }),
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || "Failed to fetch preview");
+        }
+
+        const data = await response.json();
+        setPreviewData(data);
+      } else if (migrationType === "pilot_opportunity_associations") {
+        // For pilot opportunity associations
+        const response = await fetch("/api/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            objectName: "Opportunity",
+            fields: ["Id", "Pilot_Opportunity__c"],
+            limit: 3,
+            whereClause: "Pilot_Opportunity__c != null",
           }),
         });
 
@@ -101,7 +124,8 @@ export default function MigrationPreview({
     : 0;
 
   const isAssociationMigration =
-    migrationType === "opportunity_renewal_associations";
+    migrationType === "opportunity_renewal_associations" ||
+    migrationType === "pilot_opportunity_associations";
 
   return (
     <div className="space-y-6">
@@ -111,7 +135,9 @@ export default function MigrationPreview({
           <CardTitle>Migration Preview</CardTitle>
           <CardDescription>
             {isAssociationMigration
-              ? "Review renewal associations that will be created"
+              ? migrationType === "opportunity_renewal_associations"
+                ? "Review renewal associations that will be created"
+                : "Review pilot associations that will be created"
               : "Review what will be migrated"}
           </CardDescription>
         </CardHeader>
@@ -137,7 +163,9 @@ export default function MigrationPreview({
                 <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
                   <div className="space-y-1">
                     <p className="text-sm text-muted-foreground">
-                      Opportunities with Renewals
+                      {migrationType === "opportunity_renewal_associations"
+                        ? "Opportunities with Renewals"
+                        : "Opportunities with Pilots"}
                     </p>
                     <p className="text-2xl font-bold text-primary">
                       {previewData.totalCount}
@@ -206,7 +234,11 @@ export default function MigrationPreview({
                     <div className="flex items-start gap-3">
                       <Badge variant="outline">Label</Badge>
                       <div>
-                        <p className="font-semibold">renewed_in_renewal_of</p>
+                        <p className="font-semibold">
+                          {migrationType === "opportunity_renewal_associations"
+                            ? "renewed_in_renewal_of"
+                            : "has_pilot_pilot_for"}
+                        </p>
                         <p className="mt-1 text-sm text-muted-foreground">
                           Bidirectional association label in HubSpot
                         </p>
@@ -216,7 +248,9 @@ export default function MigrationPreview({
                       <Badge variant="outline">Source</Badge>
                       <div>
                         <p className="font-semibold">
-                          Salesforce renewal_opportunity__c
+                          {migrationType === "opportunity_renewal_associations"
+                            ? "Salesforce renewal_opportunity__c"
+                            : "Salesforce Pilot_Opportunity__c"}
                         </p>
                         <p className="mt-1 text-sm text-muted-foreground">
                           Lookup field on Opportunity object
@@ -284,9 +318,17 @@ export default function MigrationPreview({
                                   </span>
                                 </div>
                                 <div className="flex items-center gap-2">
-                                  <Badge variant="secondary">Renews In</Badge>
+                                  <Badge variant="secondary">
+                                    {migrationType ===
+                                    "opportunity_renewal_associations"
+                                      ? "Renews In"
+                                      : "Has Pilot"}
+                                  </Badge>
                                   <span className="font-mono text-sm">
-                                    {record.renewal_opportunity__c}
+                                    {migrationType ===
+                                    "opportunity_renewal_associations"
+                                      ? record.renewal_opportunity__c
+                                      : record.Pilot_Opportunity__c}
                                   </span>
                                 </div>
                                 <div className="mt-3 rounded-md bg-muted/50 p-3 text-xs">

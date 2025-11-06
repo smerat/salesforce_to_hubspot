@@ -301,6 +301,41 @@ class DatabaseService {
     return mapping?.hubspot_id || null;
   }
 
+  /**
+   * Bulk get ID mappings for multiple Salesforce IDs
+   * This eliminates N+1 query problems when processing activities with relationships
+   */
+  async bulkGetIdMappings(salesforceIds: string[]): Promise<
+    Array<{
+      salesforce_id: string;
+      salesforce_type: string;
+      hubspot_id: string;
+      hubspot_type: string;
+    }>
+  > {
+    if (salesforceIds.length === 0) {
+      return [];
+    }
+
+    const result = await this.query<{
+      salesforce_id: string;
+      salesforce_type: string;
+      hubspot_id: string;
+      hubspot_type: string;
+    }>(
+      `SELECT salesforce_id, salesforce_type, hubspot_id, hubspot_type
+       FROM id_mappings
+       WHERE salesforce_id = ANY($1::text[])`,
+      [salesforceIds],
+    );
+
+    logger.debug(
+      `Bulk loaded ${result.rows.length} ID mappings for ${salesforceIds.length} Salesforce IDs`,
+    );
+
+    return result.rows;
+  }
+
   // Migration Errors
   async createMigrationError(
     runId: string,

@@ -141,6 +141,138 @@ class SalesforceExtractor {
   }
 
   /**
+   * Extract opportunities with pilot relationships
+   */
+  async extractOpportunitiesWithPilots(
+    batchSize: number = 200,
+    lastId?: string,
+  ): Promise<ExtractResult> {
+    return this.extract(
+      "Opportunity",
+      ["Id", "Pilot_Opportunity__c"],
+      batchSize,
+      lastId,
+      "Pilot_Opportunity__c != null",
+    );
+  }
+
+  /**
+   * Extract Events (calendar meetings/appointments)
+   */
+  async extractEvents(
+    batchSize: number = 200,
+    lastId?: string,
+  ): Promise<ExtractResult> {
+    return this.extract(
+      "Event",
+      [
+        "Id",
+        "Subject",
+        "Description",
+        "Location",
+        "StartDateTime",
+        "EndDateTime",
+        "DurationInMinutes",
+        "IsAllDayEvent",
+        "WhoId",
+        "WhatId",
+        "OwnerId",
+        "Type",
+      ],
+      batchSize,
+      lastId,
+    );
+  }
+
+  /**
+   * Extract EmailMessages (rich email content)
+   */
+  async extractEmailMessages(
+    batchSize: number = 200,
+    lastId?: string,
+  ): Promise<ExtractResult> {
+    return this.extract(
+      "EmailMessage",
+      [
+        "Id",
+        "Subject",
+        "TextBody",
+        "HtmlBody",
+        "FromAddress",
+        "ToAddress",
+        "CcAddress",
+        "BccAddress",
+        "MessageDate",
+        "Status",
+        "Incoming",
+        "RelatedToId",
+        "ParentId",
+        "ActivityId",
+      ],
+      batchSize,
+      lastId,
+    );
+  }
+
+  /**
+   * Extract Email Tasks (email activity logs)
+   */
+  async extractEmailTasks(
+    batchSize: number = 200,
+    lastId?: string,
+  ): Promise<ExtractResult> {
+    return this.extract(
+      "Task",
+      [
+        "Id",
+        "Subject",
+        "Description",
+        "ActivityDate",
+        "Status",
+        "Priority",
+        "WhoId",
+        "WhatId",
+        "OwnerId",
+        "Type",
+        "TaskSubtype",
+      ],
+      batchSize,
+      lastId,
+      "Type = 'Email' OR TaskSubtype = 'Email'",
+    );
+  }
+
+  /**
+   * Extract Call Tasks (phone call activities)
+   */
+  async extractCallTasks(
+    batchSize: number = 200,
+    lastId?: string,
+  ): Promise<ExtractResult> {
+    return this.extract(
+      "Task",
+      [
+        "Id",
+        "Subject",
+        "Description",
+        "ActivityDate",
+        "Status",
+        "Priority",
+        "CallDurationInSeconds",
+        "CallType",
+        "CallDisposition",
+        "WhoId",
+        "WhatId",
+        "OwnerId",
+        "Type",
+      ],
+      batchSize,
+      lastId,
+      "Type = 'Call' OR CallDurationInSeconds != null",
+    );
+  }
+
+  /**
    * Ensure connection is established
    */
   private async ensureConnected(): Promise<void> {

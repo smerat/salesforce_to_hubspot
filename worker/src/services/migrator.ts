@@ -90,6 +90,10 @@ class Migrator {
           testMode,
           testModeLimit,
         );
+      } else if (migrationType === "pilot_opportunity_associations") {
+        await this.migratePilotOpportunityAssociations(testMode, testModeLimit);
+      } else if (migrationType === "event_to_meeting_migration") {
+        await this.migrateEventsToMeetings(testMode, testModeLimit);
       } else {
         throw new Error(`Unknown migration type: ${migrationType}`);
       }
@@ -852,6 +856,589 @@ class Migrator {
       );
     } catch (error: any) {
       logger.error("❌ Failed to migrate Opportunity Renewal Associations", {
+        error: error.message,
+      });
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "failed",
+        completed_at: new Date(),
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * Migrate Pilot Opportunity associations to HubSpot Deal associations
+   */
+  private async migratePilotOpportunityAssociations(
+    testMode: boolean = false,
+    testModeLimit: number = 5,
+  ): Promise<void> {
+    if (!this.runId) {
+      throw new Error("No active migration run");
+    }
+
+    const objectType: ObjectType = "deal_associations";
+
+    logger.info("📦 Starting Pilot Opportunity Association migration");
+
+    try {
+      // Create progress tracking
+      await database.createMigrationProgress(
+        this.runId,
+        objectType,
+        "in_progress",
+      );
+      await database.updateMigrationProgress(this.runId, objectType, {
+        started_at: new Date(),
+      });
+
+      // Get association label IDs from HubSpot
+      logger.info("Fetching association label IDs from HubSpot...");
+      const associationIds = await hubspotLoader.getDealAssociationLabelIds(
+        "has_pilot_pilot_for",
+      );
+
+      if (!associationIds) {
+        throw new Error(
+          'Association label "has_pilot_pilot_for" not found in HubSpot. Please create this custom association label in your HubSpot account first.',
+        );
+      }
+
+      logger.info("Association label IDs retrieved", {
+        hasPilotTypeId: associationIds.forward,
+        pilotForTypeId: associationIds.reverse,
+      });
+
+      // Get total count of opportunities with pilots
+      const totalRecords = await salesforceExtractor.getRecordCount(
+        "Opportunity WHERE Pilot_Opportunity__c != null",
+      );
+
+      const recordsToMigrate = testMode
+        ? Math.min(testModeLimit, totalRecords)
+        : totalRecords;
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        total_records: recordsToMigrate,
+      });
+
+      if (testMode) {
+        logger.info(
+          `🧪 TEST MODE: Will process ${recordsToMigrate} of ${totalRecords} total Opportunities with pilots`,
+        );
+      } else {
+        logger.info(
+          `Total Opportunities with pilots to process: ${totalRecords}`,
+        );
+      }
+
+      let lastId: string | undefined;
+      let processedCount = 0;
+      let successCount = 0;
+      let failedCount = 0;
+      let hasMore = true;
+
+      while (hasMore && !this.shouldStop) {
+        // In test mode, stop if we've reached the limit
+        if (testMode && processedCount >= testModeLimit) {
+          logger.info(
+            `🧪 TEST MODE: Reached limit of ${testModeLimit} records, stopping`,
+          );
+          break;
+        }
+
+        // Calculate batch size (respect test mode limit)
+        const batchSize = testMode
+          ? Math.min(config.migration.batchSize, testModeLimit - processedCount)
+          : config.migration.batchSize;
+
+        // Extract batch from Salesforce
+        const extractResult =
+          await salesforceExtractor.extractOpportunitiesWithPilots(
+            batchSize,
+            lastId,
+          );
+
+        logger.info(
+          `Extracted ${extractResult.records.length} Opportunities with pilots from Salesforce`,
+        );
+
+        if (extractResult.records.length === 0) {
+          break;
+        }
+
+        // In test mode, limit the records we process
+        const recordsToProcess = testMode
+          ? extractResult.records.slice(0, testModeLimit - processedCount)
+          : extractResult.records;
+
+        // Process each opportunity pilot relationship
+        for (const opportunity of recordsToProcess) {
+          if (this.shouldStop) break;
+
+          try {
+            const opportunityId = opportunity.Id;
+            const pilotOpportunityId = opportunity.Pilot_Opportunity__c;
+
+            logger.debug("Processing pilot relationship", {
+              opportunityId,
+              pilotOpportunityId,
+            });
+
+            // Find the source deal (the production opportunity)
+            const sourceDealId = await hubspotLoader.searchDealsByProperty(
+              "hs_salesforceopportunityid",
+              opportunityId,
+            );
+
+            if (!sourceDealId) {
+              logger.warn("Source deal not found in HubSpot", {
+                salesforceOpportunityId: opportunityId,
+              });
+              await database.createMigrationError(
+                this.runId,
+                objectType,
+                opportunityId,
+                "Opportunity",
+                `Source deal not found in HubSpot for Salesforce Opportunity ID: ${opportunityId}`,
+              );
+              failedCount++;
+              continue;
+            }
+
+            // Find the target deal (the pilot opportunity)
+            const targetDealId = await hubspotLoader.searchDealsByProperty(
+              "hs_salesforceopportunityid",
+              pilotOpportunityId,
+            );
+
+            if (!targetDealId) {
+              logger.warn("Target pilot deal not found in HubSpot", {
+                salesforcePilotOpportunityId: pilotOpportunityId,
+              });
+              await database.createMigrationError(
+                this.runId,
+                objectType,
+                opportunityId,
+                "Opportunity",
+                `Pilot deal not found in HubSpot for Salesforce Opportunity ID: ${pilotOpportunityId}`,
+              );
+              failedCount++;
+              continue;
+            }
+
+            // Create bidirectional associations
+            logger.debug("Creating pilot associations", {
+              sourceOpportunityId: opportunityId,
+              pilotOpportunityId: pilotOpportunityId,
+              sourceDealId: sourceDealId,
+              targetDealId: targetDealId,
+              forwardTypeId: associationIds.forward,
+              reverseTypeId: associationIds.reverse,
+            });
+
+            // Source deal (production) "has pilot" target deal (pilot)
+            await hubspotLoader.createAssociation(
+              "deals",
+              sourceDealId,
+              "deals",
+              targetDealId,
+              associationIds.forward,
+            );
+
+            logger.info("Created forward association (has pilot)", {
+              from: sourceDealId,
+              to: targetDealId,
+            });
+
+            // Target deal (pilot) "pilot for" source deal (production)
+            await hubspotLoader.createAssociation(
+              "deals",
+              targetDealId,
+              "deals",
+              sourceDealId,
+              associationIds.reverse,
+            );
+
+            logger.info("Created reverse association (pilot for)", {
+              from: targetDealId,
+              to: sourceDealId,
+            });
+
+            logger.info("Successfully created pilot associations", {
+              sourceDealId,
+              targetDealId,
+              salesforceOpportunityId: opportunityId,
+              salesforcePilotOpportunityId: pilotOpportunityId,
+            });
+
+            successCount++;
+          } catch (error: any) {
+            logger.error("Failed to create pilot association", {
+              opportunityId: opportunity.Id,
+              error: error.message,
+            });
+
+            await database.createMigrationError(
+              this.runId,
+              objectType,
+              opportunity.Id,
+              "Opportunity",
+              `Failed to create association: ${error.message}`,
+            );
+
+            failedCount++;
+          }
+        }
+
+        // Update progress
+        processedCount += recordsToProcess.length;
+        lastId = extractResult.nextPage;
+        hasMore =
+          extractResult.hasMore &&
+          (!testMode || processedCount < testModeLimit);
+
+        await database.updateMigrationProgress(this.runId, objectType, {
+          processed_records: processedCount,
+          last_sf_id_processed: lastId,
+        });
+
+        logger.info(
+          `Progress: ${processedCount}/${recordsToMigrate} Opportunities processed (${successCount} successful, ${failedCount} failed)`,
+        );
+      }
+
+      // Update final counts
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "completed",
+        completed_at: new Date(),
+        failed_records: failedCount,
+      });
+
+      await database.createAuditLog(
+        this.runId,
+        "object_migration_completed",
+        objectType,
+        processedCount,
+        {
+          successCount,
+          failedCount,
+        },
+      );
+
+      logger.info(
+        `✅ Completed Pilot Opportunity Association migration: ${processedCount} records processed (${successCount} successful, ${failedCount} failed)`,
+      );
+    } catch (error: any) {
+      logger.error("❌ Failed to migrate Pilot Opportunity Associations", {
+        error: error.message,
+      });
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "failed",
+        completed_at: new Date(),
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * Migrate Salesforce Events to HubSpot Meetings
+   */
+  private async migrateEventsToMeetings(
+    testMode: boolean = false,
+    testModeLimit: number = 5,
+  ): Promise<void> {
+    if (!this.runId) {
+      throw new Error("No active migration run");
+    }
+
+    const objectType: ObjectType = "activities";
+
+    logger.info("📦 Starting Event to Meeting migration");
+
+    try {
+      // Create progress tracking
+      await database.createMigrationProgress(
+        this.runId,
+        objectType,
+        "in_progress",
+      );
+      await database.updateMigrationProgress(this.runId, objectType, {
+        started_at: new Date(),
+      });
+
+      // Get total count
+      const totalRecords = await salesforceExtractor.getRecordCount("Event");
+      const recordsToMigrate = testMode
+        ? Math.min(testModeLimit, totalRecords)
+        : totalRecords;
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        total_records: recordsToMigrate,
+      });
+
+      if (testMode) {
+        logger.info(
+          `🧪 TEST MODE: Will process ${recordsToMigrate} of ${totalRecords} total Events`,
+        );
+      } else {
+        logger.info(`Total Events to migrate: ${totalRecords}`);
+      }
+
+      // Initialize owner mapper
+      const connection = salesforceExtractor.getConnection();
+      if (!connection) {
+        throw new Error("Salesforce connection not available");
+      }
+      await ownerMapper.initialize(connection, this.runId);
+      logger.info("Owner mapper initialized");
+
+      let lastId: string | undefined;
+      let processedCount = 0;
+      let successCount = 0;
+      let failedCount = 0;
+      let hasMore = true;
+
+      while (hasMore && !this.shouldStop) {
+        if (testMode && processedCount >= testModeLimit) {
+          logger.info(
+            `🧪 TEST MODE: Reached limit of ${testModeLimit} records, stopping`,
+          );
+          break;
+        }
+
+        const batchSize = testMode
+          ? Math.min(config.migration.batchSize, testModeLimit - processedCount)
+          : config.migration.batchSize;
+
+        // Extract batch
+        const extractResult = await salesforceExtractor.extractEvents(
+          batchSize,
+          lastId,
+        );
+
+        logger.info(
+          `Extracted ${extractResult.records.length} Events from Salesforce`,
+        );
+
+        if (extractResult.records.length === 0) {
+          break;
+        }
+
+        const recordsToProcess = testMode
+          ? extractResult.records.slice(0, testModeLimit - processedCount)
+          : extractResult.records;
+
+        // Collect all related IDs for bulk lookup
+        const relatedIds = new Set<string>();
+        recordsToProcess.forEach((event) => {
+          if (event.WhoId) relatedIds.add(event.WhoId);
+          if (event.WhatId) relatedIds.add(event.WhatId);
+        });
+
+        // Bulk load ID mappings
+        const idMappings = await database.bulkGetIdMappings(
+          Array.from(relatedIds),
+        );
+        const idMappingCache = new Map(
+          idMappings.map((m) => [m.salesforce_id, m]),
+        );
+
+        logger.debug(`Loaded ${idMappings.length} ID mappings into cache`);
+
+        // Process each event
+        for (const event of recordsToProcess) {
+          if (this.shouldStop) break;
+
+          try {
+            const eventId = event.Id;
+
+            logger.debug("Processing event", {
+              eventId,
+              subject: event.Subject,
+            });
+
+            // Transform to HubSpot properties
+            const properties: Record<string, any> = {
+              hs_meeting_title: event.Subject || "Untitled Meeting",
+              hs_meeting_body: event.Description || "",
+              hs_meeting_location: event.Location || "",
+            };
+
+            // Convert DateTime to Unix timestamp (milliseconds)
+            if (event.StartDateTime) {
+              properties.hs_meeting_start_time = new Date(
+                event.StartDateTime,
+              ).getTime();
+            }
+            if (event.EndDateTime) {
+              properties.hs_meeting_end_time = new Date(
+                event.EndDateTime,
+              ).getTime();
+            }
+
+            // Map owner
+            if (event.OwnerId) {
+              const hsOwnerId = ownerMapper.getHubSpotOwnerId(event.OwnerId);
+              if (hsOwnerId) {
+                properties.hubspot_owner_id = hsOwnerId;
+              }
+            }
+
+            // Create meeting in HubSpot
+            const meetingId = await hubspotLoader.createMeeting(properties);
+
+            logger.info("Created meeting in HubSpot", {
+              salesforceEventId: eventId,
+              hubspotMeetingId: meetingId,
+            });
+
+            // Create associations
+            const associations: Array<{
+              toObjectType: string;
+              toObjectId: string;
+              associationTypeId: number;
+            }> = [];
+
+            // Associate to Contact (WhoId)
+            if (event.WhoId) {
+              const contactMapping = idMappingCache.get(event.WhoId);
+              if (contactMapping && contactMapping.hubspot_type === "contact") {
+                associations.push({
+                  toObjectType: "contacts",
+                  toObjectId: contactMapping.hubspot_id,
+                  associationTypeId: 200, // Meeting → Contact
+                });
+              } else {
+                logger.warn("Contact mapping not found for WhoId", {
+                  whoId: event.WhoId,
+                  eventId,
+                });
+              }
+            }
+
+            // Associate to Company/Deal (WhatId)
+            if (event.WhatId) {
+              const whatMapping = idMappingCache.get(event.WhatId);
+              if (whatMapping) {
+                if (whatMapping.hubspot_type === "company") {
+                  associations.push({
+                    toObjectType: "companies",
+                    toObjectId: whatMapping.hubspot_id,
+                    associationTypeId: 182, // Meeting → Company
+                  });
+                } else if (whatMapping.hubspot_type === "deal") {
+                  associations.push({
+                    toObjectType: "deals",
+                    toObjectId: whatMapping.hubspot_id,
+                    associationTypeId: 206, // Meeting → Deal
+                  });
+                }
+              } else {
+                logger.warn("WhatId mapping not found", {
+                  whatId: event.WhatId,
+                  eventId,
+                });
+              }
+            }
+
+            // Create all associations
+            for (const assoc of associations) {
+              try {
+                await hubspotLoader.createEngagementAssociation(
+                  "meetings",
+                  meetingId,
+                  assoc.toObjectType,
+                  assoc.toObjectId,
+                  assoc.associationTypeId,
+                );
+                logger.debug("Created association", {
+                  meetingId,
+                  toObjectType: assoc.toObjectType,
+                  toObjectId: assoc.toObjectId,
+                });
+              } catch (error: any) {
+                logger.error("Failed to create association", {
+                  error: error.message,
+                  meetingId,
+                  association: assoc,
+                });
+                // Don't fail the whole migration for association errors
+              }
+            }
+
+            // Store ID mapping
+            await database.createIdMapping(
+              this.runId,
+              eventId,
+              "Event",
+              meetingId,
+              "meeting",
+            );
+
+            successCount++;
+          } catch (error: any) {
+            logger.error("Failed to migrate event", {
+              eventId: event.Id,
+              error: error.message,
+            });
+
+            await database.createMigrationError(
+              this.runId,
+              objectType,
+              event.Id,
+              "Event",
+              `Failed to migrate: ${error.message}`,
+            );
+
+            failedCount++;
+          }
+        }
+
+        // Update progress
+        processedCount += recordsToProcess.length;
+        lastId = extractResult.nextPage;
+        hasMore =
+          extractResult.hasMore &&
+          (!testMode || processedCount < testModeLimit);
+
+        await database.updateMigrationProgress(this.runId, objectType, {
+          processed_records: processedCount,
+          last_sf_id_processed: lastId,
+        });
+
+        logger.info(
+          `Progress: ${processedCount}/${recordsToMigrate} Events processed (${successCount} successful, ${failedCount} failed)`,
+        );
+      }
+
+      // Update final counts
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "completed",
+        completed_at: new Date(),
+        failed_records: failedCount,
+      });
+
+      await database.createAuditLog(
+        this.runId,
+        "object_migration_completed",
+        objectType,
+        processedCount,
+        {
+          successCount,
+          failedCount,
+        },
+      );
+
+      logger.info(
+        `✅ Completed Event to Meeting migration: ${processedCount} records processed (${successCount} successful, ${failedCount} failed)`,
+      );
+    } catch (error: any) {
+      logger.error("❌ Failed to migrate Events to Meetings", {
         error: error.message,
       });
 
