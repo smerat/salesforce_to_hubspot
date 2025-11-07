@@ -598,6 +598,311 @@ class HubSpotLoader {
   }
 
   /**
+   * Create line items in HubSpot with deal associations
+   */
+  async createLineItems(
+    lineItems: Array<{
+      salesforceId: string;
+      properties: Record<string, any>;
+      dealId?: string;
+    }>,
+  ): Promise<BatchLoadResult> {
+    if (lineItems.length === 0) {
+      return { successful: [], failed: [] };
+    }
+
+    const successful: Array<{ salesforceId: string; hubspotId: string }> = [];
+    const failed: Array<{ salesforceId: string; error: string }> = [];
+
+    // HubSpot batch API supports up to 100 records
+    const batchSize = 100;
+    const batches = this.chunkArray(lineItems, batchSize);
+
+    for (const batch of batches) {
+      await this.rateLimiter.waitForToken();
+
+      try {
+        const inputs = batch.map((item) => {
+          const input: any = {
+            properties: item.properties,
+          };
+
+          // Add association if dealId is provided
+          if (item.dealId) {
+            input.associations = [
+              {
+                to: { id: item.dealId },
+                types: [
+                  {
+                    associationCategory: "HUBSPOT_DEFINED",
+                    associationTypeId: 20,
+                  },
+                ],
+              },
+            ];
+          }
+
+          return input;
+        });
+
+        const result = await retry(
+          async () => {
+            return await this.client.crm.lineItems.batchApi.create({
+              inputs,
+            });
+          },
+          {
+            maxRetries: config.migration.maxRetries,
+            delayMs: 1000,
+          },
+        );
+
+        result.results.forEach((hubspotRecord: any, index: number) => {
+          successful.push({
+            salesforceId: batch[index].salesforceId,
+            hubspotId: hubspotRecord.id,
+          });
+        });
+
+        logger.info(
+          `Batch created ${result.results.length} line items in HubSpot`,
+        );
+      } catch (error: any) {
+        logger.error("Batch create line items failed", {
+          error: error.message,
+          body: error.body,
+          statusCode: error.code,
+          category: error.category,
+          batchSize: batch.length,
+        });
+
+        // Log detailed error information
+        if (error.body) {
+          logger.error(
+            "Error body details:",
+            JSON.stringify(error.body, null, 2),
+          );
+        }
+
+        // Try individual creates for this batch
+        for (const item of batch) {
+          try {
+            await this.rateLimiter.waitForToken();
+            const result = await this.client.crm.lineItems.basicApi.create({
+              properties: item.properties,
+            });
+            successful.push({
+              salesforceId: item.salesforceId,
+              hubspotId: result.id,
+            });
+          } catch (individualError: any) {
+            failed.push({
+              salesforceId: item.salesforceId,
+              error: individualError.message,
+            });
+          }
+        }
+      }
+
+      // Small delay between batches
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    return { successful, failed };
+  }
+
+  /**
+   * Associate line items with deals
+   */
+  async associateLineItemsWithDeals(
+    associations: Array<{
+      lineItemId: string;
+      dealId: string;
+    }>,
+  ): Promise<{
+    successful: string[];
+    failed: Array<{ lineItemId: string; error: string }>;
+  }> {
+    if (associations.length === 0) {
+      return { successful: [], failed: [] };
+    }
+
+    const successful: string[] = [];
+    const failed: Array<{ lineItemId: string; error: string }> = [];
+
+    // HubSpot batch associations API supports up to 100 associations
+    const batchSize = 100;
+    const batches = this.chunkArray(associations, batchSize);
+
+    for (const batch of batches) {
+      await this.rateLimiter.waitForToken();
+
+      try {
+        const inputs = batch.map((assoc) => ({
+          from: { id: assoc.lineItemId },
+          to: { id: assoc.dealId },
+          type: "line_item_to_deal",
+        }));
+
+        await retry(
+          async () => {
+            return await this.client.crm.lineItems.associationsApi.create(
+              batch[0].lineItemId,
+              "deals",
+              batch[0].dealId,
+              [
+                {
+                  associationCategory: "HUBSPOT_DEFINED",
+                  associationTypeId: 20,
+                },
+              ],
+            );
+          },
+          {
+            maxRetries: config.migration.maxRetries,
+            delayMs: 1000,
+          },
+        );
+
+        // If batch API doesn't work, do individual associations
+        for (const assoc of batch) {
+          try {
+            await this.rateLimiter.waitForToken();
+            await this.client.crm.lineItems.associationsApi.create(
+              assoc.lineItemId,
+              "deals",
+              assoc.dealId,
+              [
+                {
+                  associationCategory: "HUBSPOT_DEFINED",
+                  associationTypeId: 20,
+                },
+              ],
+            );
+            successful.push(assoc.lineItemId);
+          } catch (individualError: any) {
+            failed.push({
+              lineItemId: assoc.lineItemId,
+              error: individualError.message,
+            });
+          }
+        }
+
+        logger.info(`Associated ${successful.length} line items with deals`);
+      } catch (error: any) {
+        logger.error("Batch associate line items failed", {
+          error: error.message,
+          batchSize: batch.length,
+        });
+
+        // Mark all as failed for this batch
+        batch.forEach((assoc) => {
+          failed.push({
+            lineItemId: assoc.lineItemId,
+            error: error.message,
+          });
+        });
+      }
+
+      // Small delay between batches
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    return { successful, failed };
+  }
+
+  /**
+   * Delete all line items (useful for cleanup before re-running migration)
+   */
+  async deleteAllLineItems(): Promise<number> {
+    await this.rateLimiter.waitForToken();
+
+    try {
+      // Search for all line items
+      const searchResponse = await this.client.crm.lineItems.searchApi.doSearch(
+        {
+          filterGroups: [],
+          limit: 100,
+        },
+      );
+
+      let deletedCount = 0;
+      const lineItemIds = searchResponse.results.map((item) => item.id);
+
+      if (lineItemIds.length > 0) {
+        logger.info(`Found ${lineItemIds.length} line items to delete`);
+
+        // Delete in batches
+        const batchSize = 100;
+        for (let i = 0; i < lineItemIds.length; i += batchSize) {
+          const batch = lineItemIds.slice(i, i + batchSize);
+
+          await this.rateLimiter.waitForToken();
+
+          try {
+            await this.client.crm.lineItems.batchApi.archive({
+              inputs: batch.map((id) => ({ id })),
+            });
+            deletedCount += batch.length;
+            logger.info(`Deleted ${batch.length} line items`);
+          } catch (error: any) {
+            logger.error("Failed to delete batch of line items", {
+              error: error.message,
+              batchSize: batch.length,
+            });
+          }
+        }
+      }
+
+      logger.info(`Total line items deleted: ${deletedCount}`);
+      return deletedCount;
+    } catch (error: any) {
+      logger.error("Failed to search/delete line items", {
+        error: error.message,
+      });
+      return 0;
+    }
+  }
+
+  /**
+   * Get deal by Salesforce Opportunity ID
+   */
+  async getDealBySalesforceOpportunityId(
+    salesforceOpportunityId: string,
+  ): Promise<string | null> {
+    await this.rateLimiter.waitForToken();
+
+    try {
+      const searchResponse = await this.client.crm.deals.searchApi.doSearch({
+        filterGroups: [
+          {
+            filters: [
+              {
+                propertyName: "hs_salesforceopportunityid",
+                operator: "EQ",
+                value: salesforceOpportunityId,
+              },
+            ],
+          },
+        ],
+        limit: 1,
+      });
+
+      if (searchResponse.results.length > 0) {
+        return searchResponse.results[0].id;
+      }
+
+      return null;
+    } catch (error: any) {
+      logger.error("Failed to find deal by Salesforce Opportunity ID", {
+        salesforceOpportunityId,
+        error: error.message,
+      });
+      return null;
+    }
+  }
+
+  /**
    * Helper to chunk array into smaller batches
    */
   private chunkArray<T>(array: T[], size: number): T[][] {

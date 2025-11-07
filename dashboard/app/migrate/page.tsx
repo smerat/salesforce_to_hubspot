@@ -21,7 +21,8 @@ type MigrationType =
   | "pilot_opportunity_associations"
   | "opportunity_product_dates"
   | "sync_deal_contract_dates"
-  | "opportunity_line_item_dates";
+  | "opportunity_line_item_dates"
+  | "line_items";
 
 export default function MigratePage() {
   const router = useRouter();
@@ -29,6 +30,44 @@ export default function MigratePage() {
   const [migrationType, setMigrationType] =
     useState<MigrationType>("account_to_company");
   const [fieldMappings, setFieldMappings] = useState<FieldMapping[]>([]);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  async function handleDeleteAllLineItems() {
+    if (
+      !confirm(
+        "Are you sure you want to delete ALL line items from HubSpot? This action cannot be undone.",
+      )
+    ) {
+      return;
+    }
+
+    setIsDeleting(true);
+
+    try {
+      const response = await fetch("/api/delete-line-items", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.error || "Failed to delete line items");
+      }
+
+      alert(
+        result.message ||
+          `Successfully deleted ${result.deletedCount} line items`,
+      );
+    } catch (err: any) {
+      console.error("Error deleting line items:", err);
+      alert("Error: " + err.message);
+    } finally {
+      setIsDeleting(false);
+    }
+  }
 
   async function handleConfirmMigration(testMode: boolean = false) {
     try {
@@ -90,6 +129,8 @@ export default function MigratePage() {
         return "Sync Deal Contract Dates migration";
       case "opportunity_line_item_dates":
         return "OpportunityLineItem Dates migration";
+      case "line_items":
+        return "OpportunityLineItem to Deal Line Items migration";
       default:
         return "Migration";
     }
@@ -256,11 +297,34 @@ export default function MigratePage() {
                     from Line Item Schedule dates (OpportunityLineItemId lookup)
                   </p>
                 </button>
+
+                <button
+                  onClick={() => {
+                    setMigrationType("line_items");
+                    setStep("preview");
+                  }}
+                  className="w-full rounded-lg border-2 border-border bg-background p-6 text-left transition-all hover:border-primary/50 hover:bg-primary/5"
+                >
+                  <h3 className="text-lg font-semibold">
+                    Line Items (Salesforce → HubSpot)
+                  </h3>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Migrate OpportunityLineItems to HubSpot Deal Line Items with
+                    product details, pricing, and dates
+                  </p>
+                </button>
               </div>
 
-              <div className="mt-6 flex justify-start">
+              <div className="mt-6 flex justify-between">
                 <Button onClick={() => router.push("/")} variant="outline">
                   Cancel
+                </Button>
+                <Button
+                  onClick={handleDeleteAllLineItems}
+                  variant="destructive"
+                  disabled={isDeleting}
+                >
+                  {isDeleting ? "Deleting..." : "Delete All HubSpot Line Items"}
                 </Button>
               </div>
             </CardContent>

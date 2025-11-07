@@ -19,7 +19,8 @@ type MigrationType =
   | "pilot_opportunity_associations"
   | "opportunity_product_dates"
   | "sync_deal_contract_dates"
-  | "opportunity_line_item_dates";
+  | "opportunity_line_item_dates"
+  | "line_items";
 
 interface MigrationPreviewProps {
   migrationType: MigrationType;
@@ -162,6 +163,35 @@ export default function MigrationPreview({
 
         const data = await response.json();
         setPreviewData(data);
+      } else if (migrationType === "line_items") {
+        // For line items migration
+        const response = await fetch("/api/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            objectName: "OpportunityLineItem",
+            fields: [
+              "Id",
+              "OpportunityId",
+              "Product2.Name",
+              "Quantity",
+              "UnitPrice",
+              "TotalPrice",
+              "Start_Date__c",
+              "End_Date__c",
+              "installments__c",
+            ],
+            limit: 3,
+          }),
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || "Failed to fetch preview");
+        }
+
+        const data = await response.json();
+        setPreviewData(data);
       } else {
         // For account to company migration
         const sfFields = fieldMappings.map((m) => m.salesforceField);
@@ -212,6 +242,8 @@ export default function MigrationPreview({
   const isOpportunityLineItemDates =
     migrationType === "opportunity_line_item_dates";
 
+  const isLineItems = migrationType === "line_items";
+
   return (
     <div className="space-y-6">
       {/* Summary Card */}
@@ -229,7 +261,9 @@ export default function MigrationPreview({
                   ? "Review Opportunities that will sync dates to HubSpot Deals"
                   : isOpportunityLineItemDates
                     ? "Review Opportunity Line Items that will be updated in Salesforce"
-                    : "Review what will be migrated"}
+                    : isLineItems
+                      ? "Review OpportunityLineItems that will be migrated to HubSpot Deal Line Items"
+                      : "Review what will be migrated"}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
@@ -250,7 +284,31 @@ export default function MigrationPreview({
           ) : previewData ? (
             <>
               {/* Stats */}
-              {isSyncDealContractDates ? (
+              {isLineItems ? (
+                <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Line Items</p>
+                    <p className="text-2xl font-bold text-primary">
+                      {previewData.totalCount}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      From Salesforce
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Target</p>
+                    <p className="text-2xl font-bold text-green-400">
+                      HubSpot Deals
+                    </p>
+                    <p className="text-xs text-muted-foreground">Line Items</p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Est. Time</p>
+                    <p className="text-2xl font-bold">{estimatedTime}</p>
+                    <p className="text-xs text-muted-foreground">Minutes</p>
+                  </div>
+                </div>
+              ) : isSyncDealContractDates ? (
                 <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
                   <div className="space-y-1">
                     <p className="text-sm text-muted-foreground">
@@ -396,7 +454,52 @@ export default function MigrationPreview({
               )}
 
               {/* Field Mappings or Association Details */}
-              {isOpportunityLineItemDates ? (
+              {isLineItems ? (
+                <div>
+                  <h3 className="mb-3 font-semibold">Migration Details</h3>
+                  <div className="space-y-3 rounded-md border p-4">
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Source</Badge>
+                      <div>
+                        <p className="font-semibold">
+                          OpportunityLineItem (Salesforce)
+                        </p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Product line items with pricing, dates, and details
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Mapping</Badge>
+                      <div className="text-sm">
+                        <p className="font-semibold">Field Transformations</p>
+                        <ul className="mt-1 space-y-1 text-muted-foreground">
+                          <li>• Product2.Name → name</li>
+                          <li>• Quantity → quantity</li>
+                          <li>• UnitPrice → price</li>
+                          <li>• TotalPrice → amount</li>
+                          <li>• Start_Date__c → start_date (custom)</li>
+                          <li>• End_Date__c → end_date (custom)</li>
+                          <li>• installments__c → installments (custom)</li>
+                        </ul>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Target</Badge>
+                      <div>
+                        <p className="font-semibold">
+                          Deal Line Items (HubSpot)
+                        </p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Associated with deals via OpportunityId matching.
+                          Owner: Sean Merat, Type: Service, Pricing:
+                          Volume-based
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : isOpportunityLineItemDates ? (
                 <div>
                   <h3 className="mb-3 font-semibold">Migration Details</h3>
                   <div className="space-y-3 rounded-md border p-4">
@@ -552,12 +655,13 @@ export default function MigrationPreview({
                     Records)
                   </h3>
                   <div className="space-y-4">
-                    {isOpportunityLineItemDates
+                    {isLineItems
                       ? previewData.sampleRecords.map((record, idx) => (
                           <Card key={record.Id}>
                             <CardHeader className="pb-3">
                               <CardTitle className="text-base">
-                                {record.Name || `Line Item ${idx + 1}`}
+                                {record.Product2?.Name ||
+                                  `Line Item ${idx + 1}`}
                               </CardTitle>
                             </CardHeader>
                             <CardContent>
@@ -582,53 +686,56 @@ export default function MigrationPreview({
                                     )}
                                   </span>
                                 </div>
-                                <div className="flex items-center gap-2">
-                                  <Badge variant="secondary">
-                                    Current Start Date
-                                  </Badge>
-                                  <span className="font-mono text-sm">
-                                    {record.Start_Date__c || (
-                                      <span className="text-muted-foreground">
-                                        Not Set
-                                      </span>
-                                    )}
-                                  </span>
+                                <div className="grid grid-cols-2 gap-2 text-sm">
+                                  <div>
+                                    <span className="text-muted-foreground">
+                                      Quantity:
+                                    </span>{" "}
+                                    {record.Quantity || "N/A"}
+                                  </div>
+                                  <div>
+                                    <span className="text-muted-foreground">
+                                      Price:
+                                    </span>{" "}
+                                    ${record.UnitPrice || 0}
+                                  </div>
+                                  <div>
+                                    <span className="text-muted-foreground">
+                                      Total:
+                                    </span>{" "}
+                                    ${record.TotalPrice || 0}
+                                  </div>
                                 </div>
                                 <div className="flex items-center gap-2">
-                                  <Badge variant="secondary">
-                                    Current End Date
-                                  </Badge>
-                                  <span className="font-mono text-sm">
-                                    {record.End_Date__c || (
-                                      <span className="text-muted-foreground">
-                                        Not Set
-                                      </span>
-                                    )}
+                                  <Badge variant="secondary">Dates</Badge>
+                                  <span className="text-sm text-muted-foreground">
+                                    {record.Start_Date__c || "N/A"} →{" "}
+                                    {record.End_Date__c || "N/A"}
                                   </span>
                                 </div>
                                 <div className="mt-3 rounded-md bg-muted/50 p-3 text-xs">
                                   <p className="text-muted-foreground">
-                                    Will be updated based on associated Line
-                                    Item Schedule dates
+                                    Will be created as HubSpot line item and
+                                    associated with corresponding deal
                                   </p>
                                 </div>
                               </div>
                             </CardContent>
                           </Card>
                         ))
-                      : isOpportunityProductDates
+                      : isOpportunityLineItemDates
                         ? previewData.sampleRecords.map((record, idx) => (
                             <Card key={record.Id}>
                               <CardHeader className="pb-3">
                                 <CardTitle className="text-base">
-                                  {record.Name || `Opportunity ${idx + 1}`}
+                                  {record.Name || `Line Item ${idx + 1}`}
                                 </CardTitle>
                               </CardHeader>
                               <CardContent>
                                 <div className="space-y-2">
                                   <div className="flex items-center gap-2">
                                     <Badge variant="secondary">
-                                      Opportunity ID
+                                      Line Item ID
                                     </Badge>
                                     <span className="font-mono text-sm">
                                       {record.Id}
@@ -636,10 +743,22 @@ export default function MigrationPreview({
                                   </div>
                                   <div className="flex items-center gap-2">
                                     <Badge variant="secondary">
+                                      Opportunity ID
+                                    </Badge>
+                                    <span className="font-mono text-sm">
+                                      {record.OpportunityId || (
+                                        <span className="text-muted-foreground">
+                                          Not Set
+                                        </span>
+                                      )}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <Badge variant="secondary">
                                       Current Start Date
                                     </Badge>
                                     <span className="font-mono text-sm">
-                                      {record.Product_Start_Date__c || (
+                                      {record.Start_Date__c || (
                                         <span className="text-muted-foreground">
                                           Not Set
                                         </span>
@@ -651,7 +770,7 @@ export default function MigrationPreview({
                                       Current End Date
                                     </Badge>
                                     <span className="font-mono text-sm">
-                                      {record.Product_End_Date__c || (
+                                      {record.End_Date__c || (
                                         <span className="text-muted-foreground">
                                           Not Set
                                         </span>
@@ -668,12 +787,12 @@ export default function MigrationPreview({
                               </CardContent>
                             </Card>
                           ))
-                        : isAssociationMigration
+                        : isOpportunityProductDates
                           ? previewData.sampleRecords.map((record, idx) => (
                               <Card key={record.Id}>
                                 <CardHeader className="pb-3">
                                   <CardTitle className="text-base">
-                                    Opportunity {idx + 1}
+                                    {record.Name || `Opportunity ${idx + 1}`}
                                   </CardTitle>
                                 </CardHeader>
                                 <CardContent>
@@ -688,79 +807,132 @@ export default function MigrationPreview({
                                     </div>
                                     <div className="flex items-center gap-2">
                                       <Badge variant="secondary">
-                                        {migrationType ===
-                                        "opportunity_renewal_associations"
-                                          ? "Renews In"
-                                          : "Has Pilot"}
+                                        Current Start Date
                                       </Badge>
                                       <span className="font-mono text-sm">
-                                        {migrationType ===
-                                        "opportunity_renewal_associations"
-                                          ? record.renewal_opportunity__c
-                                          : record.Pilot_Opportunity__c}
+                                        {record.Product_Start_Date__c || (
+                                          <span className="text-muted-foreground">
+                                            Not Set
+                                          </span>
+                                        )}
+                                      </span>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <Badge variant="secondary">
+                                        Current End Date
+                                      </Badge>
+                                      <span className="font-mono text-sm">
+                                        {record.Product_End_Date__c || (
+                                          <span className="text-muted-foreground">
+                                            Not Set
+                                          </span>
+                                        )}
                                       </span>
                                     </div>
                                     <div className="mt-3 rounded-md bg-muted/50 p-3 text-xs">
                                       <p className="text-muted-foreground">
-                                        Will create bidirectional association
-                                        between deals with these Salesforce IDs
+                                        Will be updated based on associated Line
+                                        Item Schedule dates
                                       </p>
                                     </div>
                                   </div>
                                 </CardContent>
                               </Card>
                             ))
-                          : previewData.sampleRecords.map((record, idx) => (
-                              <Card key={record.Id}>
-                                <CardHeader className="pb-3">
-                                  <CardTitle className="text-base">
-                                    Record {idx + 1}
-                                  </CardTitle>
-                                </CardHeader>
-                                <CardContent>
-                                  <div className="space-y-2">
-                                    {fieldMappings.map((mapping) => {
-                                      const sfValue =
-                                        record[mapping.salesforceField];
-                                      return (
-                                        <div
-                                          key={mapping.salesforceField}
-                                          className="flex items-start border-b border-border/50 pb-2 last:border-0"
-                                        >
-                                          <div className="flex-1">
-                                            <p className="text-xs text-muted-foreground">
-                                              {mapping.salesforceField}
-                                            </p>
-                                            <p className="font-medium">
-                                              {sfValue || (
-                                                <span className="text-muted-foreground">
-                                                  null
-                                                </span>
-                                              )}
-                                            </p>
+                          : isAssociationMigration
+                            ? previewData.sampleRecords.map((record, idx) => (
+                                <Card key={record.Id}>
+                                  <CardHeader className="pb-3">
+                                    <CardTitle className="text-base">
+                                      Opportunity {idx + 1}
+                                    </CardTitle>
+                                  </CardHeader>
+                                  <CardContent>
+                                    <div className="space-y-2">
+                                      <div className="flex items-center gap-2">
+                                        <Badge variant="secondary">
+                                          Opportunity ID
+                                        </Badge>
+                                        <span className="font-mono text-sm">
+                                          {record.Id}
+                                        </span>
+                                      </div>
+                                      <div className="flex items-center gap-2">
+                                        <Badge variant="secondary">
+                                          {migrationType ===
+                                          "opportunity_renewal_associations"
+                                            ? "Renews In"
+                                            : "Has Pilot"}
+                                        </Badge>
+                                        <span className="font-mono text-sm">
+                                          {migrationType ===
+                                          "opportunity_renewal_associations"
+                                            ? record.renewal_opportunity__c
+                                            : record.Pilot_Opportunity__c}
+                                        </span>
+                                      </div>
+                                      <div className="mt-3 rounded-md bg-muted/50 p-3 text-xs">
+                                        <p className="text-muted-foreground">
+                                          Will create bidirectional association
+                                          between deals with these Salesforce
+                                          IDs
+                                        </p>
+                                      </div>
+                                    </div>
+                                  </CardContent>
+                                </Card>
+                              ))
+                            : previewData.sampleRecords.map((record, idx) => (
+                                <Card key={record.Id}>
+                                  <CardHeader className="pb-3">
+                                    <CardTitle className="text-base">
+                                      Record {idx + 1}
+                                    </CardTitle>
+                                  </CardHeader>
+                                  <CardContent>
+                                    <div className="space-y-2">
+                                      {fieldMappings.map((mapping) => {
+                                        const sfValue =
+                                          record[mapping.salesforceField];
+                                        return (
+                                          <div
+                                            key={mapping.salesforceField}
+                                            className="flex items-start border-b border-border/50 pb-2 last:border-0"
+                                          >
+                                            <div className="flex-1">
+                                              <p className="text-xs text-muted-foreground">
+                                                {mapping.salesforceField}
+                                              </p>
+                                              <p className="font-medium">
+                                                {sfValue || (
+                                                  <span className="text-muted-foreground">
+                                                    null
+                                                  </span>
+                                                )}
+                                              </p>
+                                            </div>
+                                            <div className="px-2 text-muted-foreground">
+                                              →
+                                            </div>
+                                            <div className="flex-1">
+                                              <p className="text-xs text-muted-foreground">
+                                                {mapping.hubspotField}
+                                              </p>
+                                              <p className="font-medium">
+                                                {sfValue || (
+                                                  <span className="text-muted-foreground">
+                                                    null
+                                                  </span>
+                                                )}
+                                              </p>
+                                            </div>
                                           </div>
-                                          <div className="px-2 text-muted-foreground">
-                                            →
-                                          </div>
-                                          <div className="flex-1">
-                                            <p className="text-xs text-muted-foreground">
-                                              {mapping.hubspotField}
-                                            </p>
-                                            <p className="font-medium">
-                                              {sfValue || (
-                                                <span className="text-muted-foreground">
-                                                  null
-                                                </span>
-                                              )}
-                                            </p>
-                                          </div>
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                </CardContent>
-                              </Card>
-                            ))}
+                                        );
+                                      })}
+                                    </div>
+                                  </CardContent>
+                                </Card>
+                              ))}
                   </div>
                 </div>
               )}

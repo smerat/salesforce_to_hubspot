@@ -533,6 +533,68 @@ class SalesforceExtractor {
   }
 
   /**
+   * Extract OpportunityLineItems with Product2 lookup for line item migration
+   */
+  async extractOpportunityLineItems(
+    batchSize: number = 200,
+    lastId?: string,
+  ): Promise<ExtractResult> {
+    await this.ensureConnected();
+
+    const fields = [
+      "Id",
+      "OpportunityId",
+      "Product2Id",
+      "Product2.Name",
+      "Quantity",
+      "UnitPrice",
+      "TotalPrice",
+      "ServiceDate",
+      "Start_Date__c",
+      "End_Date__c",
+      "installments__c",
+    ];
+
+    let query = `SELECT ${fields.join(", ")} FROM OpportunityLineItem`;
+
+    if (lastId) {
+      query += ` WHERE Id > '${lastId}'`;
+    }
+
+    query += ` ORDER BY Id ASC LIMIT ${batchSize}`;
+
+    await this.rateLimiter.waitForToken();
+
+    try {
+      const result = await this.connection!.query(query);
+
+      // Determine if there are more records
+      // If we got exactly batchSize records, there might be more
+      const hasMore = result.records.length === batchSize;
+
+      logger.info("Extracted OpportunityLineItems batch", {
+        recordCount: result.records.length,
+        batchSize: batchSize,
+        hasMore: hasMore,
+        resultDone: result.done,
+        lastId:
+          result.records.length > 0
+            ? result.records[result.records.length - 1].Id
+            : null,
+      });
+
+      return {
+        records: result.records as SalesforceRecord[],
+        hasMore: hasMore,
+        nextPage: result.nextRecordsUrl,
+      };
+    } catch (error) {
+      logger.error("Failed to extract OpportunityLineItems", { error });
+      throw error;
+    }
+  }
+
+  /**
    * Helper to chunk array into smaller batches
    */
   private chunkArray<T>(array: T[], size: number): T[][] {

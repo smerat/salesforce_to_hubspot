@@ -9,7 +9,8 @@ export type ObjectType =
   | "deal_associations"
   | "opportunity_product_dates"
   | "sync_deal_contract_dates"
-  | "opportunity_line_item_dates";
+  | "opportunity_line_item_dates"
+  | "line_items";
 
 export type MigrationStatus =
   | "queued"
@@ -148,6 +149,21 @@ export interface SalesforceOpportunityLineItemSchedule
   Quantity?: number;
 }
 
+export interface SalesforceOpportunityLineItem extends SalesforceRecord {
+  OpportunityId: string;
+  Product2Id: string;
+  Quantity?: number;
+  UnitPrice?: number;
+  TotalPrice?: number;
+  ServiceDate?: string;
+  Start_Date__c?: string;
+  End_Date__c?: string;
+  installments__c?: number;
+  Product2?: {
+    Name?: string;
+  };
+}
+
 // HubSpot types
 export interface HubSpotContact {
   properties: {
@@ -193,6 +209,23 @@ export interface HubSpotDeal {
     to: { id: string };
     types: Array<{ associationCategory: string; associationTypeId: number }>;
   }>;
+}
+
+export interface HubSpotLineItem {
+  properties: {
+    name: string;
+    quantity?: number;
+    price?: number;
+    amount?: number;
+    discount?: number;
+    start_date?: string;
+    end_date?: string;
+    installments?: number;
+    hs_pricing_model?: string;
+    hs_product_type?: string;
+    hubspot_owner_id?: string;
+    [key: string]: any;
+  };
 }
 
 // Field mapping types

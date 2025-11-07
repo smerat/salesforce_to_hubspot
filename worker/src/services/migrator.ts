@@ -100,6 +100,8 @@ class Migrator {
         await this.syncDealContractDates(testMode, testModeLimit);
       } else if (migrationType === "opportunity_line_item_dates") {
         await this.migrateOpportunityLineItemDates(testMode, testModeLimit);
+      } else if (migrationType === "line_items") {
+        await this.migrateLineItems(testMode, testModeLimit);
       } else {
         throw new Error(`Unknown migration type: ${migrationType}`);
       }
@@ -2288,6 +2290,344 @@ class Migrator {
       );
     } catch (error: any) {
       logger.error("❌ Failed to migrate OpportunityLineItem Dates", {
+        error: error.message,
+      });
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "failed",
+        completed_at: new Date(),
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * Migrate Salesforce OpportunityLineItems to HubSpot Line Items
+   */
+  private async migrateLineItems(
+    testMode: boolean = false,
+    testModeLimit: number = 5,
+  ): Promise<void> {
+    if (!this.runId) {
+      throw new Error("No active migration run");
+    }
+
+    const objectType: ObjectType = "line_items";
+
+    logger.info("Starting OpportunityLineItem to HubSpot Line Item migration");
+
+    try {
+      // Clean up existing line items first to avoid duplicates
+      logger.info("Cleaning up existing line items in HubSpot...");
+      const deletedCount = await hubspotLoader.deleteAllLineItems();
+      logger.info(`Deleted ${deletedCount} existing line items`);
+
+      // Initialize progress tracking
+      await database.createMigrationProgress(
+        this.runId,
+        objectType,
+        "in_progress",
+      );
+      await database.updateMigrationProgress(this.runId, objectType, {
+        started_at: new Date(),
+      });
+
+      await database.createAuditLog(
+        this.runId,
+        "object_migration_started",
+        objectType,
+      );
+
+      // Get total count
+      const totalCount = await salesforceExtractor.getRecordCount(
+        "OpportunityLineItem",
+      );
+      const recordsToMigrate = testMode
+        ? Math.min(totalCount, testModeLimit)
+        : totalCount;
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        total_records: recordsToMigrate,
+      });
+
+      logger.info(`Total OpportunityLineItems to migrate: ${recordsToMigrate}`);
+
+      let processedCount = 0;
+      let successCount = 0;
+      let failedCount = 0;
+      let lastId: string | undefined = undefined;
+      let hasMore = true;
+
+      while (hasMore && !this.shouldStop) {
+        // Extract batch from Salesforce
+        const batchSize = testMode ? testModeLimit : 100;
+
+        logger.info(
+          `=== LOOP ITERATION START === testMode=${testMode}, testModeLimit=${testModeLimit}, batchSize=${batchSize}, processedCount=${processedCount}, hasMore=${hasMore}, lastId=${lastId || "null"}`,
+        );
+
+        const extractResult =
+          await salesforceExtractor.extractOpportunityLineItems(
+            batchSize,
+            lastId,
+          );
+
+        logger.info(
+          `Extract result from Salesforce: extracted ${extractResult.records.length} records, hasMore=${extractResult.hasMore}, nextPage=${extractResult.nextPage || "null"}`,
+        );
+
+        if (extractResult.records.length === 0) {
+          logger.warn("No records extracted, breaking loop");
+          break;
+        }
+
+        const recordsToProcess = testMode
+          ? extractResult.records.slice(0, testModeLimit - processedCount)
+          : extractResult.records;
+
+        logger.info(
+          `Records to process in this batch: ${recordsToProcess.length} (testMode=${testMode})`,
+        );
+
+        logger.info(
+          `Processing batch of ${recordsToProcess.length} OpportunityLineItems`,
+        );
+
+        // Transform to HubSpot line items
+        const lineItemsToCreate: Array<{
+          salesforceId: string;
+          opportunityId: string;
+          properties: Record<string, any>;
+        }> = [];
+
+        for (const lineItem of recordsToProcess) {
+          try {
+            // Get product name from Product2 lookup
+            const productName =
+              lineItem.Product2?.Name || `Product ${lineItem.Product2Id}`;
+
+            // Build HubSpot line item properties
+            const properties: Record<string, any> = {
+              name: productName,
+              hs_product_id: "", // Will be left empty for now
+            };
+
+            // Map fields
+            if (lineItem.Start_Date__c) {
+              properties.start_date = lineItem.Start_Date__c;
+            }
+            if (lineItem.End_Date__c) {
+              properties.end_date = lineItem.End_Date__c;
+            }
+            if (
+              lineItem.installments__c !== undefined &&
+              lineItem.installments__c !== null
+            ) {
+              properties.installments = lineItem.installments__c.toString();
+            }
+            if (
+              lineItem.TotalPrice !== undefined &&
+              lineItem.TotalPrice !== null
+            ) {
+              properties.amount = lineItem.TotalPrice.toString();
+            }
+            if (lineItem.Quantity !== undefined && lineItem.Quantity !== null) {
+              properties.quantity = lineItem.Quantity.toString();
+            }
+            if (
+              lineItem.UnitPrice !== undefined &&
+              lineItem.UnitPrice !== null
+            ) {
+              properties.price = lineItem.UnitPrice.toString();
+            }
+
+            lineItemsToCreate.push({
+              salesforceId: lineItem.Id,
+              opportunityId: lineItem.OpportunityId,
+              properties,
+            });
+
+            // Log the first few items for debugging
+            if (lineItemsToCreate.length <= 3) {
+              logger.info(`Sample line item properties:`, {
+                salesforceId: lineItem.Id,
+                properties,
+              });
+            }
+          } catch (transformError: any) {
+            logger.error(
+              `Failed to transform OpportunityLineItem ${lineItem.Id}`,
+              {
+                error: transformError.message,
+              },
+            );
+            failedCount++;
+
+            await database.createMigrationError(
+              this.runId,
+              lineItem.Id,
+              "OpportunityLineItem",
+              objectType,
+              transformError.message,
+            );
+          }
+        }
+
+        // Find deal IDs BEFORE creating line items so we can include associations in the create call
+        if (lineItemsToCreate.length > 0) {
+          logger.info(
+            `Finding deal IDs for ${lineItemsToCreate.length} line items`,
+          );
+
+          const lineItemsWithDeals: Array<{
+            salesforceId: string;
+            opportunityId: string;
+            properties: Record<string, any>;
+            dealId: string;
+          }> = [];
+
+          for (const item of lineItemsToCreate) {
+            // Find the HubSpot Deal by Salesforce OpportunityId
+            const dealId = await hubspotLoader.getDealBySalesforceOpportunityId(
+              item.opportunityId,
+            );
+
+            if (dealId) {
+              lineItemsWithDeals.push({
+                salesforceId: item.salesforceId,
+                opportunityId: item.opportunityId,
+                properties: item.properties,
+                dealId: dealId,
+              });
+            } else {
+              logger.warn(
+                `Could not find HubSpot Deal for Opportunity ${item.opportunityId}`,
+                {
+                  salesforceLineItemId: item.salesforceId,
+                },
+              );
+              failedCount++;
+
+              await database.createMigrationError(
+                this.runId,
+                item.salesforceId,
+                "OpportunityLineItem",
+                objectType,
+                `Could not find HubSpot Deal for Opportunity ${item.opportunityId}`,
+              );
+            }
+          }
+
+          logger.info(
+            `Creating ${lineItemsWithDeals.length} line items in HubSpot with associations`,
+          );
+
+          // Create line items with associations included in the create call
+          const createResult = await hubspotLoader.createLineItems(
+            lineItemsWithDeals.map((item) => ({
+              salesforceId: item.salesforceId,
+              properties: item.properties,
+              dealId: item.dealId,
+            })),
+          );
+
+          // Store ID mappings for successful creations
+          for (const created of createResult.successful) {
+            const lineItemData = lineItemsWithDeals.find(
+              (item) => item.salesforceId === created.salesforceId,
+            );
+
+            if (lineItemData) {
+              await database.createIdMapping(
+                this.runId,
+                created.salesforceId,
+                "OpportunityLineItem",
+                created.hubspotId,
+                "line_item",
+                {
+                  opportunityId: lineItemData.opportunityId,
+                  dealId: lineItemData.dealId,
+                },
+              );
+            }
+          }
+
+          successCount += createResult.successful.length;
+
+          logger.info(
+            `Successfully created ${createResult.successful.length} line items with associations`,
+          );
+
+          // Log creation failures
+          for (const failed of createResult.failed) {
+            logger.error(`Failed to create line item`, {
+              salesforceId: failed.salesforceId,
+              error: failed.error,
+            });
+            failedCount++;
+
+            await database.createMigrationError(
+              this.runId,
+              failed.salesforceId,
+              "OpportunityLineItem",
+              objectType,
+              failed.error,
+            );
+          }
+        }
+
+        // Update progress
+        processedCount += recordsToProcess.length;
+        if (recordsToProcess.length > 0) {
+          lastId = recordsToProcess[recordsToProcess.length - 1].Id;
+        }
+
+        // Calculate hasMore for next iteration
+        const testModeCondition = !testMode || processedCount < testModeLimit;
+        hasMore = extractResult.hasMore && testModeCondition;
+
+        logger.info(
+          `=== LOOP ITERATION END === processedCount=${processedCount}, extractHasMore=${extractResult.hasMore}, testMode=${testMode}, testModeLimit=${testModeLimit}, testModeCondition=${testModeCondition}, calculatedHasMore=${hasMore}, willContinue=${hasMore && !this.shouldStop}`,
+        );
+
+        await database.updateMigrationProgress(this.runId, objectType, {
+          processed_records: processedCount,
+          last_sf_id_processed: lastId,
+        });
+
+        logger.info(
+          `Progress: ${processedCount}/${recordsToMigrate} OpportunityLineItems processed (${successCount} created, ${failedCount} failed)`,
+        );
+      }
+
+      logger.info(
+        `=== LOOP EXITED === finalProcessedCount=${processedCount}, finalHasMore=${hasMore}, shouldStop=${this.shouldStop}`,
+      );
+
+      // Update final counts
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "completed",
+        completed_at: new Date(),
+        failed_records: failedCount,
+      });
+
+      await database.createAuditLog(
+        this.runId,
+        "object_migration_completed",
+        objectType,
+        processedCount,
+        {
+          successCount,
+          failedCount,
+        },
+      );
+
+      logger.info(
+        `✅ Completed Line Items migration: ${processedCount} line items processed (${successCount} created, ${failedCount} failed)`,
+      );
+    } catch (error: any) {
+      logger.error("❌ Failed to migrate Line Items", {
         error: error.message,
       });
 
