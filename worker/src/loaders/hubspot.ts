@@ -46,6 +46,19 @@ class HubSpotLoader {
 
         const result = await retry(
           async () => {
+            // Handle meetings/tasks/calls/emails which are under crm.objects
+            if (
+              ["meetings", "tasks", "calls", "emails", "notes"].includes(
+                objectType,
+              )
+            ) {
+              return await (this.client.crm.objects as any)[
+                objectType
+              ].batchApi.create({
+                inputs,
+              });
+            }
+            // Handle standard CRM objects (companies, contacts, deals, etc)
             return await (this.client.crm as any)[objectType].batchApi.create({
               inputs,
             });
@@ -369,8 +382,18 @@ class HubSpotLoader {
       logger.debug("Created meeting in HubSpot", { meetingId: result.id });
       return result.id;
     } catch (error: any) {
+      console.error("=== MEETING CREATION ERROR ===");
+      console.error("Error message:", error.message);
+      console.error("Error code:", error.code);
+      console.error("Error body:", JSON.stringify(error.body, null, 2));
+      console.error("Properties sent:", JSON.stringify(properties, null, 2));
+      console.error("Full error:", error);
+      console.error("==============================");
+
       logger.error("Failed to create meeting", {
         error: error.message,
+        errorCode: error.code,
+        errorBody: error.body,
         properties,
       });
       throw error;
@@ -440,6 +463,131 @@ class HubSpotLoader {
   }
 
   /**
+   * Find HubSpot object by Salesforce ID property
+   */
+  async findObjectBySalesforceId(
+    objectType: "contacts" | "companies" | "deals",
+    salesforceId: string,
+  ): Promise<string | null> {
+    await this.rateLimiter.waitForToken();
+
+    const propertyMap = {
+      contacts: "salesforcecontactid",
+      companies: "salesforceaccountid",
+      deals: "hs_salesforceopportunityid",
+    };
+
+    const propertyName = propertyMap[objectType];
+
+    try {
+      const searchResult = await this.client.crm[objectType].searchApi.doSearch(
+        {
+          filterGroups: [
+            {
+              filters: [
+                {
+                  propertyName,
+                  operator: "EQ",
+                  value: salesforceId,
+                },
+              ],
+            },
+          ],
+          limit: 1,
+        },
+      );
+
+      if (searchResult.results.length > 0) {
+        return searchResult.results[0].id;
+      }
+
+      return null;
+    } catch (error: any) {
+      logger.warn("Failed to search for object by Salesforce ID", {
+        objectType,
+        salesforceId,
+        error: error.message,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Bulk find HubSpot objects by Salesforce IDs
+   */
+  async bulkFindObjectsBySalesforceIds(
+    objectType: "contacts" | "companies" | "deals",
+    salesforceIds: string[],
+  ): Promise<Map<string, string>> {
+    if (salesforceIds.length === 0) {
+      return new Map();
+    }
+
+    await this.rateLimiter.waitForToken();
+
+    const propertyMap = {
+      contacts: "salesforcecontactid",
+      companies: "salesforceaccountid",
+      deals: "hs_salesforceopportunityid",
+    };
+
+    const propertyName = propertyMap[objectType];
+    const results = new Map<string, string>();
+
+    try {
+      // HubSpot search API can handle IN operator with multiple values
+      const searchResult = await this.client.crm[objectType].searchApi.doSearch(
+        {
+          filterGroups: [
+            {
+              filters: [
+                {
+                  propertyName,
+                  operator: "IN",
+                  values: salesforceIds,
+                },
+              ],
+            },
+          ],
+          properties: [propertyName],
+          limit: 100,
+        },
+      );
+
+      for (const result of searchResult.results) {
+        const sfId = (result.properties as any)[propertyName];
+        if (sfId) {
+          results.set(sfId, result.id);
+        }
+      }
+
+      logger.info(
+        `Found ${results.size} ${objectType} out of ${salesforceIds.length} Salesforce IDs`,
+      );
+    } catch (error: any) {
+      console.error("=== HUBSPOT SEARCH ERROR ===");
+      console.error("Object Type:", objectType);
+      console.error("Salesforce IDs:", salesforceIds);
+      console.error("Property Name:", propertyName);
+      console.error("Error:", error.message);
+      console.error("Error Body:", JSON.stringify(error.body, null, 2));
+      console.error("Error Code:", error.code);
+      console.error("Full Error:", error);
+      console.error("========================");
+
+      logger.error("Failed to bulk search for objects by Salesforce IDs", {
+        objectType,
+        salesforceIdCount: salesforceIds.length,
+        error: error.message,
+        errorBody: error.body,
+        errorCode: error.code,
+      });
+    }
+
+    return results;
+  }
+
+  /**
    * Create association between engagement and CRM object
    */
   async createEngagementAssociation(
@@ -450,6 +598,14 @@ class HubSpotLoader {
     associationTypeId: number,
   ): Promise<void> {
     await this.rateLimiter.waitForToken();
+
+    logger.info("Creating association", {
+      fromObjectType,
+      fromObjectId,
+      toObjectType,
+      toObjectId,
+      associationTypeId,
+    });
 
     try {
       await retry(
@@ -473,7 +629,7 @@ class HubSpotLoader {
         },
       );
 
-      logger.debug("Created engagement association", {
+      logger.info("Successfully created engagement association", {
         fromObjectType,
         fromObjectId,
         toObjectType,
@@ -481,6 +637,25 @@ class HubSpotLoader {
         associationTypeId,
       });
     } catch (error: any) {
+      // Check if it's a 404 or validation error for invalid object IDs
+      const isNotFoundError =
+        error.code === 404 ||
+        (error.body?.message?.includes("invalid") &&
+          error.body?.context?.INVALID_OBJECT_IDS);
+
+      if (isNotFoundError) {
+        logger.warn("Skipping association - object not found in HubSpot", {
+          fromObjectType,
+          fromObjectId,
+          toObjectType,
+          toObjectId,
+          error: error.message,
+          errorBody: error.body,
+        });
+        // Don't throw - this is expected if objects were deleted
+        return;
+      }
+
       logger.error("Failed to create engagement association", {
         error: error.message,
         fromObjectType,
@@ -815,21 +990,29 @@ class HubSpotLoader {
    * Delete all line items (useful for cleanup before re-running migration)
    */
   async deleteAllLineItems(): Promise<number> {
-    await this.rateLimiter.waitForToken();
+    let totalDeleted = 0;
+    let hasMore = true;
+
+    logger.info("Starting to delete all line items from HubSpot");
 
     try {
-      // Search for all line items
-      const searchResponse = await this.client.crm.lineItems.searchApi.doSearch(
-        {
-          filterGroups: [],
-          limit: 100,
-        },
-      );
+      while (hasMore) {
+        await this.rateLimiter.waitForToken();
 
-      let deletedCount = 0;
-      const lineItemIds = searchResponse.results.map((item) => item.id);
+        // Search for line items
+        const searchResponse =
+          await this.client.crm.lineItems.searchApi.doSearch({
+            filterGroups: [],
+            limit: 100,
+          });
 
-      if (lineItemIds.length > 0) {
+        const lineItemIds = searchResponse.results.map((item) => item.id);
+
+        if (lineItemIds.length === 0) {
+          hasMore = false;
+          break;
+        }
+
         logger.info(`Found ${lineItemIds.length} line items to delete`);
 
         // Delete in batches
@@ -843,8 +1026,10 @@ class HubSpotLoader {
             await this.client.crm.lineItems.batchApi.archive({
               inputs: batch.map((id) => ({ id })),
             });
-            deletedCount += batch.length;
-            logger.info(`Deleted ${batch.length} line items`);
+            totalDeleted += batch.length;
+            logger.info(
+              `Deleted ${batch.length} line items (total: ${totalDeleted})`,
+            );
           } catch (error: any) {
             logger.error("Failed to delete batch of line items", {
               error: error.message,
@@ -852,15 +1037,152 @@ class HubSpotLoader {
             });
           }
         }
+
+        // Wait for HubSpot's search index to catch up
+        logger.info("Waiting 2 seconds for HubSpot search index to update...");
+        await new Promise((resolve) => setTimeout(resolve, 2000));
       }
 
-      logger.info(`Total line items deleted: ${deletedCount}`);
-      return deletedCount;
+      logger.info(`✅ Total line items deleted: ${totalDeleted}`);
+      return totalDeleted;
     } catch (error: any) {
       logger.error("Failed to search/delete line items", {
         error: error.message,
       });
-      return 0;
+      return totalDeleted;
+    }
+  }
+
+  /**
+   * Delete all tasks (useful for cleanup before re-running migration)
+   */
+  async deleteAllTasks(): Promise<number> {
+    let totalDeleted = 0;
+    let iterationCount = 0;
+
+    logger.info("Starting to delete all tasks from HubSpot");
+
+    try {
+      while (true) {
+        iterationCount++;
+        await this.rateLimiter.waitForToken();
+
+        // Use getAll (list API) instead of search - this is real-time, not indexed
+        const listResponse = await this.client.crm.objects.tasks.getAll(100);
+
+        const taskIds = listResponse.results.map((item: any) => item.id);
+
+        logger.info(
+          `Iteration ${iterationCount}: Found ${taskIds.length} tasks to delete`,
+        );
+
+        if (taskIds.length === 0) {
+          break;
+        }
+
+        // Delete in batches
+        const batchSize = 100;
+        for (let i = 0; i < taskIds.length; i += batchSize) {
+          const batch = taskIds.slice(i, i + batchSize);
+
+          await this.rateLimiter.waitForToken();
+
+          try {
+            await this.client.crm.objects.tasks.batchApi.archive({
+              inputs: batch.map((id) => ({ id })),
+            });
+            totalDeleted += batch.length;
+            logger.info(
+              `Deleted ${batch.length} tasks (total: ${totalDeleted})`,
+            );
+          } catch (error: any) {
+            logger.error("Failed to delete batch of tasks", {
+              error: error.message,
+              batchSize: batch.length,
+            });
+          }
+        }
+      }
+
+      logger.info(`✅ Total tasks deleted: ${totalDeleted}`);
+      return totalDeleted;
+    } catch (error: any) {
+      logger.error("Failed to list/delete tasks", {
+        error: error.message,
+      });
+      return totalDeleted;
+    }
+  }
+
+  /**
+   * Delete all meetings (useful for cleanup before re-running migration)
+   */
+  async deleteAllMeetings(): Promise<number> {
+    let totalDeleted = 0;
+
+    logger.info("Starting to delete all meetings from HubSpot");
+
+    try {
+      // Keep deleting until no more meetings exist
+      while (true) {
+        await this.rateLimiter.waitForToken();
+
+        // List meetings (real-time, not search index)
+        const listResponse =
+          await this.client.crm.objects.meetings.basicApi.getPage(
+            100, // limit
+            undefined, // after (always get first page since we're deleting)
+          );
+
+        const meetingIds = listResponse.results.map((item: any) => item.id);
+
+        logger.info(`Found ${meetingIds.length} meetings to delete`);
+
+        if (meetingIds.length === 0) {
+          logger.info("No more meetings found, stopping.");
+          break;
+        }
+
+        // Delete in batches
+        const batchSize = 100;
+        for (let i = 0; i < meetingIds.length; i += batchSize) {
+          const batch = meetingIds.slice(i, i + batchSize);
+
+          await this.rateLimiter.waitForToken();
+
+          try {
+            await this.client.crm.objects.meetings.batchApi.archive({
+              inputs: batch.map((id) => ({ id })),
+            });
+            totalDeleted += batch.length;
+            logger.info(
+              `Deleted ${batch.length} meetings (total: ${totalDeleted})`,
+            );
+          } catch (error: any) {
+            logger.error("Failed to delete batch of meetings", {
+              error: error.message,
+              batchSize: batch.length,
+            });
+          }
+        }
+      }
+
+      logger.info(`✅ Total meetings deleted: ${totalDeleted}`);
+      return totalDeleted;
+    } catch (error: any) {
+      console.error("=== DELETE MEETINGS ERROR ===");
+      console.error("Error message:", error.message);
+      console.error("Error code:", error.code);
+      console.error("Error body:", JSON.stringify(error.body, null, 2));
+      console.error("Full error:", error);
+      console.error("============================");
+
+      logger.error("Failed to list/delete meetings", {
+        error: error.message,
+        errorCode: error.code,
+        errorBody: error.body,
+      });
+      return totalDeleted;
     }
   }
 

@@ -102,6 +102,12 @@ class Migrator {
         await this.migrateOpportunityLineItemDates(testMode, testModeLimit);
       } else if (migrationType === "line_items") {
         await this.migrateLineItems(testMode, testModeLimit);
+      } else if (migrationType === "cleanup_tasks") {
+        await this.cleanupHubSpotTasks();
+      } else if (migrationType === "cleanup_meetings") {
+        await this.cleanupHubSpotMeetings();
+      } else if (migrationType === "cleanup_line_items") {
+        await this.cleanupHubSpotLineItems();
       } else {
         throw new Error(`Unknown migration type: ${migrationType}`);
       }
@@ -255,6 +261,7 @@ class Migrator {
         await database.updateMigrationProgress(this.runId, objectType, {
           processed_records: processedCount,
           last_sf_id_processed: lastId,
+          failed_records: failedCount,
         });
 
         logger.info(
@@ -1241,35 +1248,100 @@ class Migrator {
           ? extractResult.records.slice(0, testModeLimit - processedCount)
           : extractResult.records;
 
-        // Collect all related IDs for bulk lookup
-        const relatedIds = new Set<string>();
-        recordsToProcess.forEach((event) => {
-          if (event.WhoId) relatedIds.add(event.WhoId);
-          if (event.WhatId) relatedIds.add(event.WhatId);
+        // Fetch EventRelation records for all events in this batch
+        const eventIds = recordsToProcess.map((event) => event.Id);
+        const eventRelations =
+          await salesforceExtractor.extractEventRelations(eventIds);
+
+        logger.info(
+          `Fetched ${eventRelations.length} EventRelation records for ${eventIds.length} events`,
+        );
+
+        // Group EventRelations by EventId
+        const eventRelationsByEventId = new Map<string, any[]>();
+        eventRelations.forEach((relation) => {
+          if (!eventRelationsByEventId.has(relation.EventId)) {
+            eventRelationsByEventId.set(relation.EventId, []);
+          }
+          eventRelationsByEventId.get(relation.EventId)!.push(relation);
         });
 
-        // Bulk load ID mappings
-        const idMappings = await database.bulkGetIdMappings(
-          Array.from(relatedIds),
-        );
-        const idMappingCache = new Map(
-          idMappings.map((m) => [m.salesforce_id, m]),
-        );
+        // Separate RelationIds by type (Contact vs Account/Opportunity)
+        const contactIds = new Set<string>();
+        const accountIds = new Set<string>();
+        const opportunityIds = new Set<string>();
 
-        logger.debug(`Loaded ${idMappings.length} ID mappings into cache`);
+        eventRelations.forEach((relation) => {
+          if (!relation.RelationId) return;
 
-        // Process each event
+          // IsWhat=true means Account or Opportunity
+          if (relation.IsWhat) {
+            // Salesforce Account IDs start with 001, Opportunity IDs start with 006
+            if (relation.RelationId.startsWith("001")) {
+              accountIds.add(relation.RelationId);
+            } else if (relation.RelationId.startsWith("006")) {
+              opportunityIds.add(relation.RelationId);
+            }
+          }
+          // IsWhat=false means Contact or Lead
+          else {
+            // Salesforce Contact IDs start with 003
+            if (relation.RelationId.startsWith("003")) {
+              contactIds.add(relation.RelationId);
+            }
+          }
+        });
+
+        logger.info("Found RelationIds to lookup", {
+          contacts: contactIds.size,
+          contactIds: Array.from(contactIds),
+          accounts: accountIds.size,
+          accountIds: Array.from(accountIds),
+          opportunities: opportunityIds.size,
+          opportunityIds: Array.from(opportunityIds),
+        });
+
+        // Search HubSpot for objects by Salesforce IDs
+        const [contactMappings, companyMappings, dealMappings] =
+          await Promise.all([
+            contactIds.size > 0
+              ? hubspotLoader.bulkFindObjectsBySalesforceIds(
+                  "contacts",
+                  Array.from(contactIds),
+                )
+              : Promise.resolve(new Map<string, string>()),
+            accountIds.size > 0
+              ? hubspotLoader.bulkFindObjectsBySalesforceIds(
+                  "companies",
+                  Array.from(accountIds),
+                )
+              : Promise.resolve(new Map<string, string>()),
+            opportunityIds.size > 0
+              ? hubspotLoader.bulkFindObjectsBySalesforceIds(
+                  "deals",
+                  Array.from(opportunityIds),
+                )
+              : Promise.resolve(new Map<string, string>()),
+          ]);
+
+        logger.info("HubSpot object lookup results", {
+          contactsFound: contactMappings.size,
+          contactMappings: Object.fromEntries(contactMappings),
+          companiesFound: companyMappings.size,
+          companyMappings: Object.fromEntries(companyMappings),
+          dealsFound: dealMappings.size,
+          dealMappings: Object.fromEntries(dealMappings),
+        });
+
+        // Transform all events to meeting records
+        const meetingsToCreate: Array<{
+          salesforceId: string;
+          properties: Record<string, any>;
+          event: any;
+        }> = [];
+
         for (const event of recordsToProcess) {
-          if (this.shouldStop) break;
-
           try {
-            const eventId = event.Id;
-
-            logger.debug("Processing event", {
-              eventId,
-              subject: event.Subject,
-            });
-
             // Transform to HubSpot properties
             const properties: Record<string, any> = {
               hs_meeting_title: event.Subject || "Untitled Meeting",
@@ -1279,9 +1351,10 @@ class Migrator {
 
             // Convert DateTime to Unix timestamp (milliseconds)
             if (event.StartDateTime) {
-              properties.hs_meeting_start_time = new Date(
-                event.StartDateTime,
-              ).getTime();
+              const startTime = new Date(event.StartDateTime).getTime();
+              properties.hs_meeting_start_time = startTime;
+              // hs_timestamp is required and should be set to the start time
+              properties.hs_timestamp = startTime;
             }
             if (event.EndDateTime) {
               properties.hs_meeting_end_time = new Date(
@@ -1297,100 +1370,13 @@ class Migrator {
               }
             }
 
-            // Create meeting in HubSpot
-            const meetingId = await hubspotLoader.createMeeting(properties);
-
-            logger.info("Created meeting in HubSpot", {
-              salesforceEventId: eventId,
-              hubspotMeetingId: meetingId,
+            meetingsToCreate.push({
+              salesforceId: event.Id,
+              properties,
+              event,
             });
-
-            // Create associations
-            const associations: Array<{
-              toObjectType: string;
-              toObjectId: string;
-              associationTypeId: number;
-            }> = [];
-
-            // Associate to Contact (WhoId)
-            if (event.WhoId) {
-              const contactMapping = idMappingCache.get(event.WhoId);
-              if (contactMapping && contactMapping.hubspot_type === "contact") {
-                associations.push({
-                  toObjectType: "contacts",
-                  toObjectId: contactMapping.hubspot_id,
-                  associationTypeId: 200, // Meeting → Contact
-                });
-              } else {
-                logger.warn("Contact mapping not found for WhoId", {
-                  whoId: event.WhoId,
-                  eventId,
-                });
-              }
-            }
-
-            // Associate to Company/Deal (WhatId)
-            if (event.WhatId) {
-              const whatMapping = idMappingCache.get(event.WhatId);
-              if (whatMapping) {
-                if (whatMapping.hubspot_type === "company") {
-                  associations.push({
-                    toObjectType: "companies",
-                    toObjectId: whatMapping.hubspot_id,
-                    associationTypeId: 182, // Meeting → Company
-                  });
-                } else if (whatMapping.hubspot_type === "deal") {
-                  associations.push({
-                    toObjectType: "deals",
-                    toObjectId: whatMapping.hubspot_id,
-                    associationTypeId: 206, // Meeting → Deal
-                  });
-                }
-              } else {
-                logger.warn("WhatId mapping not found", {
-                  whatId: event.WhatId,
-                  eventId,
-                });
-              }
-            }
-
-            // Create all associations
-            for (const assoc of associations) {
-              try {
-                await hubspotLoader.createEngagementAssociation(
-                  "meetings",
-                  meetingId,
-                  assoc.toObjectType,
-                  assoc.toObjectId,
-                  assoc.associationTypeId,
-                );
-                logger.debug("Created association", {
-                  meetingId,
-                  toObjectType: assoc.toObjectType,
-                  toObjectId: assoc.toObjectId,
-                });
-              } catch (error: any) {
-                logger.error("Failed to create association", {
-                  error: error.message,
-                  meetingId,
-                  association: assoc,
-                });
-                // Don't fail the whole migration for association errors
-              }
-            }
-
-            // Store ID mapping
-            await database.createIdMapping(
-              this.runId,
-              eventId,
-              "Event",
-              meetingId,
-              "meeting",
-            );
-
-            successCount++;
           } catch (error: any) {
-            logger.error("Failed to migrate event", {
+            logger.error("Failed to transform event", {
               eventId: event.Id,
               error: error.message,
             });
@@ -1400,10 +1386,185 @@ class Migrator {
               objectType,
               event.Id,
               "Event",
-              `Failed to migrate: ${error.message}`,
+              `Failed to transform: ${error.message}`,
             );
 
             failedCount++;
+          }
+        }
+
+        // Batch create meetings in HubSpot
+        if (meetingsToCreate.length > 0) {
+          const createResult = await hubspotLoader.batchCreate(
+            "meetings",
+            meetingsToCreate,
+          );
+
+          logger.info(
+            `Batch created ${createResult.successful.length} meetings in HubSpot`,
+          );
+
+          // Store ID mappings for successful meetings
+          if (createResult.successful.length > 0) {
+            await database.bulkCreateIdMappings(
+              createResult.successful.map((item) => ({
+                runId: this.runId!,
+                salesforceId: item.salesforceId,
+                salesforceType: "Event",
+                hubspotId: item.hubspotId,
+                hubspotType: "meeting",
+              })),
+            );
+
+            successCount += createResult.successful.length;
+
+            // Create associations for successful meetings using EventRelation
+            for (const { salesforceId, hubspotId } of createResult.successful) {
+              try {
+                // Get EventRelations for this event
+                const relations =
+                  eventRelationsByEventId.get(salesforceId) || [];
+
+                logger.info("Processing associations for meeting", {
+                  salesforceId,
+                  hubspotId,
+                  relationCount: relations.length,
+                });
+
+                if (relations.length === 0) {
+                  logger.info("Event has no EventRelation records", {
+                    salesforceId,
+                  });
+                  continue;
+                }
+
+                // Process each EventRelation
+                for (const relation of relations) {
+                  let hubspotObjectId: string | undefined;
+                  let objectType:
+                    | "contacts"
+                    | "companies"
+                    | "deals"
+                    | undefined;
+
+                  // IsWhat=true means this is the "Related To" (Account/Opportunity)
+                  if (relation.IsWhat) {
+                    if (relation.RelationId.startsWith("001")) {
+                      // Account -> Company
+                      hubspotObjectId = companyMappings.get(
+                        relation.RelationId,
+                      );
+                      objectType = "companies";
+                    } else if (relation.RelationId.startsWith("006")) {
+                      // Opportunity -> Deal
+                      hubspotObjectId = dealMappings.get(relation.RelationId);
+                      objectType = "deals";
+                    }
+                  }
+                  // IsWhat=false means this is an attendee (Contact/Lead)
+                  else {
+                    if (relation.RelationId.startsWith("003")) {
+                      // Contact
+                      hubspotObjectId = contactMappings.get(
+                        relation.RelationId,
+                      );
+                      objectType = "contacts";
+                    }
+                  }
+
+                  logger.info("Processing EventRelation", {
+                    salesforceEventId: salesforceId,
+                    salesforceRelationId: relation.RelationId,
+                    isWhat: relation.IsWhat,
+                    objectType,
+                    hubspotMeetingId: hubspotId,
+                    hubspotObjectId,
+                    found: !!hubspotObjectId,
+                  });
+
+                  if (!hubspotObjectId || !objectType) {
+                    logger.warn("No HubSpot object found for RelationId", {
+                      relationId: relation.RelationId,
+                      salesforceId,
+                    });
+                    continue;
+                  }
+
+                  // Create the association
+                  const associationTypeId =
+                    objectType === "contacts"
+                      ? 200 // Meeting → Contact
+                      : objectType === "companies"
+                        ? 182 // Meeting → Company
+                        : 206; // Meeting → Deal
+
+                  logger.info(`Creating ${objectType} association`, {
+                    salesforceEventId: salesforceId,
+                    salesforceRelationId: relation.RelationId,
+                    hubspotMeetingId: hubspotId,
+                    hubspotObjectId: hubspotObjectId,
+                    associationTypeId,
+                  });
+
+                  await hubspotLoader.createEngagementAssociation(
+                    "meetings",
+                    hubspotId,
+                    objectType,
+                    hubspotObjectId,
+                    associationTypeId,
+                  );
+
+                  logger.info(`Successfully created ${objectType} association`);
+                }
+              } catch (error: any) {
+                const relations =
+                  eventRelationsByEventId.get(salesforceId) || [];
+                console.error("=== ASSOCIATION ERROR ===");
+                console.error("Error message:", error.message);
+                console.error("Error code:", error.code);
+                console.error(
+                  "Error body:",
+                  JSON.stringify(error.body, null, 2),
+                );
+                console.error("Meeting ID:", hubspotId);
+                console.error("Salesforce Event ID:", salesforceId);
+                console.error(
+                  "EventRelations:",
+                  JSON.stringify(relations, null, 2),
+                );
+                console.error("Full error:", error);
+                console.error("========================");
+
+                logger.error("Failed to create associations for meeting", {
+                  error: error.message,
+                  errorCode: error.code,
+                  errorBody: error.body,
+                  meetingId: hubspotId,
+                  salesforceId,
+                  relationCount: relations.length,
+                });
+                // Don't fail the whole migration for association errors
+              }
+            }
+          }
+
+          // Log failed creates
+          for (const failed of createResult.failed) {
+            await database.createMigrationError(
+              this.runId,
+              objectType,
+              failed.salesforceId,
+              "Event",
+              failed.error,
+            );
+
+            failedCount++;
+          }
+
+          if (createResult.failed.length > 0) {
+            logger.warn(
+              `Failed to create ${createResult.failed.length} meetings in HubSpot`,
+            );
           }
         }
 
@@ -1417,6 +1578,7 @@ class Migrator {
         await database.updateMigrationProgress(this.runId, objectType, {
           processed_records: processedCount,
           last_sf_id_processed: lastId,
+          failed_records: failedCount,
         });
 
         logger.info(
@@ -1933,6 +2095,7 @@ class Migrator {
             properties: {
               contract_start_date: contractStartDate,
               contract_end_date: contractEndDate,
+              recurring_revenue_inactive_date: contractEndDate,
             },
           });
         }
@@ -2628,6 +2791,172 @@ class Migrator {
       );
     } catch (error: any) {
       logger.error("❌ Failed to migrate Line Items", {
+        error: error.message,
+      });
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "failed",
+        completed_at: new Date(),
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * Cleanup HubSpot Tasks
+   */
+  private async cleanupHubSpotTasks(): Promise<void> {
+    if (!this.runId) {
+      throw new Error("No active migration run");
+    }
+
+    const objectType: ObjectType = "cleanup_tasks";
+
+    logger.info("🧹 Starting HubSpot Tasks Cleanup");
+
+    try {
+      await database.createMigrationProgress(
+        this.runId,
+        objectType,
+        "in_progress",
+      );
+      await database.updateMigrationProgress(this.runId, objectType, {
+        started_at: new Date(),
+      });
+
+      logger.info("Deleting all Tasks from HubSpot...");
+      const tasksDeleted = await hubspotLoader.deleteAllTasks();
+      logger.info(`✅ Deleted ${tasksDeleted} tasks`);
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "completed",
+        completed_at: new Date(),
+        processed_records: tasksDeleted,
+      });
+
+      await database.createAuditLog(
+        this.runId,
+        "object_migration_completed",
+        objectType,
+        tasksDeleted,
+      );
+
+      logger.info(`✅ Tasks cleanup completed: ${tasksDeleted} tasks deleted`);
+    } catch (error: any) {
+      logger.error("❌ Failed to cleanup HubSpot tasks", {
+        error: error.message,
+      });
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "failed",
+        completed_at: new Date(),
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * Cleanup HubSpot Meetings
+   */
+  private async cleanupHubSpotMeetings(): Promise<void> {
+    if (!this.runId) {
+      throw new Error("No active migration run");
+    }
+
+    const objectType: ObjectType = "cleanup_meetings";
+
+    logger.info("🧹 Starting HubSpot Meetings Cleanup");
+
+    try {
+      await database.createMigrationProgress(
+        this.runId,
+        objectType,
+        "in_progress",
+      );
+      await database.updateMigrationProgress(this.runId, objectType, {
+        started_at: new Date(),
+      });
+
+      logger.info("Deleting all Meetings from HubSpot...");
+      const meetingsDeleted = await hubspotLoader.deleteAllMeetings();
+      logger.info(`✅ Deleted ${meetingsDeleted} meetings`);
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "completed",
+        completed_at: new Date(),
+        processed_records: meetingsDeleted,
+      });
+
+      await database.createAuditLog(
+        this.runId,
+        "object_migration_completed",
+        objectType,
+        meetingsDeleted,
+      );
+
+      logger.info(
+        `✅ Meetings cleanup completed: ${meetingsDeleted} meetings deleted`,
+      );
+    } catch (error: any) {
+      logger.error("❌ Failed to cleanup HubSpot meetings", {
+        error: error.message,
+      });
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "failed",
+        completed_at: new Date(),
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * Cleanup HubSpot Line Items
+   */
+  private async cleanupHubSpotLineItems(): Promise<void> {
+    if (!this.runId) {
+      throw new Error("No active migration run");
+    }
+
+    const objectType: ObjectType = "cleanup_line_items";
+
+    logger.info("🧹 Starting HubSpot Line Items Cleanup");
+
+    try {
+      await database.createMigrationProgress(
+        this.runId,
+        objectType,
+        "in_progress",
+      );
+      await database.updateMigrationProgress(this.runId, objectType, {
+        started_at: new Date(),
+      });
+
+      logger.info("Deleting all Line Items from HubSpot...");
+      const lineItemsDeleted = await hubspotLoader.deleteAllLineItems();
+      logger.info(`✅ Deleted ${lineItemsDeleted} line items`);
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "completed",
+        completed_at: new Date(),
+        processed_records: lineItemsDeleted,
+      });
+
+      await database.createAuditLog(
+        this.runId,
+        "object_migration_completed",
+        objectType,
+        lineItemsDeleted,
+      );
+
+      logger.info(
+        `✅ Line Items cleanup completed: ${lineItemsDeleted} line items deleted`,
+      );
+    } catch (error: any) {
+      logger.error("❌ Failed to cleanup HubSpot line items", {
         error: error.message,
       });
 

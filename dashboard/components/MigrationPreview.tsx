@@ -17,10 +17,14 @@ type MigrationType =
   | "account_to_company"
   | "opportunity_renewal_associations"
   | "pilot_opportunity_associations"
+  | "event_to_meeting_migration"
   | "opportunity_product_dates"
   | "sync_deal_contract_dates"
   | "opportunity_line_item_dates"
-  | "line_items";
+  | "line_items"
+  | "cleanup_tasks"
+  | "cleanup_meetings"
+  | "cleanup_line_items";
 
 interface MigrationPreviewProps {
   migrationType: MigrationType;
@@ -49,6 +53,20 @@ export default function MigrationPreview({
     setError(null);
 
     try {
+      // For cleanup types - no preview needed, just set dummy data
+      if (
+        migrationType === "cleanup_tasks" ||
+        migrationType === "cleanup_meetings" ||
+        migrationType === "cleanup_line_items"
+      ) {
+        setPreviewData({
+          totalCount: 0,
+          sampleRecords: [],
+        });
+        setLoading(false);
+        return;
+      }
+
       // For opportunity renewal associations
       if (migrationType === "opportunity_renewal_associations") {
         const response = await fetch("/api/preview", {
@@ -79,6 +97,35 @@ export default function MigrationPreview({
             fields: ["Id", "Pilot_Opportunity__c"],
             limit: 3,
             whereClause: "Pilot_Opportunity__c != null",
+          }),
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || "Failed to fetch preview");
+        }
+
+        const data = await response.json();
+        setPreviewData(data);
+      } else if (migrationType === "event_to_meeting_migration") {
+        // For event to meeting migration
+        const response = await fetch("/api/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            objectName: "Event",
+            fields: [
+              "Id",
+              "Subject",
+              "Description",
+              "Location",
+              "StartDateTime",
+              "EndDateTime",
+              "WhoId",
+              "WhatId",
+              "OwnerId",
+            ],
+            limit: 3,
           }),
         });
 
@@ -234,6 +281,8 @@ export default function MigrationPreview({
     migrationType === "opportunity_renewal_associations" ||
     migrationType === "pilot_opportunity_associations";
 
+  const isEventToMeeting = migrationType === "event_to_meeting_migration";
+
   const isOpportunityProductDates =
     migrationType === "opportunity_product_dates";
 
@@ -244,6 +293,14 @@ export default function MigrationPreview({
 
   const isLineItems = migrationType === "line_items";
 
+  const isCleanup =
+    migrationType === "cleanup_tasks" ||
+    migrationType === "cleanup_meetings" ||
+    migrationType === "cleanup_line_items";
+  const isCleanupTasks = migrationType === "cleanup_tasks";
+  const isCleanupMeetings = migrationType === "cleanup_meetings";
+  const isCleanupLineItems = migrationType === "cleanup_line_items";
+
   return (
     <div className="space-y-6">
       {/* Summary Card */}
@@ -251,19 +308,27 @@ export default function MigrationPreview({
         <CardHeader>
           <CardTitle>Migration Preview</CardTitle>
           <CardDescription>
-            {isAssociationMigration
-              ? migrationType === "opportunity_renewal_associations"
-                ? "Review renewal associations that will be created"
-                : "Review pilot associations that will be created"
-              : isOpportunityProductDates
-                ? "Review Opportunities that will be updated in Salesforce"
-                : isSyncDealContractDates
-                  ? "Review Opportunities that will sync dates to HubSpot Deals"
-                  : isOpportunityLineItemDates
-                    ? "Review Opportunity Line Items that will be updated in Salesforce"
-                    : isLineItems
-                      ? "Review OpportunityLineItems that will be migrated to HubSpot Deal Line Items"
-                      : "Review what will be migrated"}
+            {isCleanupTasks
+              ? "⚠️ This will permanently delete ALL tasks from HubSpot"
+              : isCleanupMeetings
+                ? "⚠️ This will permanently delete ALL meetings from HubSpot"
+                : isCleanupLineItems
+                  ? "⚠️ This will permanently delete ALL line items from HubSpot"
+                  : isAssociationMigration
+                    ? migrationType === "opportunity_renewal_associations"
+                      ? "Review renewal associations that will be created"
+                      : "Review pilot associations that will be created"
+                    : isEventToMeeting
+                      ? "Review Salesforce Events that will be migrated to HubSpot Meetings"
+                      : isOpportunityProductDates
+                        ? "Review Opportunities that will be updated in Salesforce"
+                        : isSyncDealContractDates
+                          ? "Review Opportunities that will sync dates to HubSpot Deals"
+                          : isOpportunityLineItemDates
+                            ? "Review Opportunity Line Items that will be updated in Salesforce"
+                            : isLineItems
+                              ? "Review OpportunityLineItems that will be migrated to HubSpot Deal Line Items"
+                              : "Review what will be migrated"}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
@@ -284,7 +349,48 @@ export default function MigrationPreview({
           ) : previewData ? (
             <>
               {/* Stats */}
-              {isLineItems ? (
+              {isCleanup ? (
+                <div className="rounded-lg border-2 border-red-500 bg-red-500/10 p-6">
+                  <h3 className="text-lg font-semibold text-red-600">
+                    ⚠️ Warning: Destructive Operation
+                  </h3>
+                  <p className="mt-2 text-sm">This will permanently delete:</p>
+                  <ul className="mt-2 space-y-1 text-sm">
+                    {isCleanupTasks && (
+                      <li className="flex items-center gap-2">
+                        <span className="text-red-500">•</span>
+                        <span className="font-semibold">ALL Tasks</span> from
+                        HubSpot
+                      </li>
+                    )}
+                    {isCleanupMeetings && (
+                      <li className="flex items-center gap-2">
+                        <span className="text-red-500">•</span>
+                        <span className="font-semibold">ALL Meetings</span> from
+                        HubSpot
+                      </li>
+                    )}
+                    {isCleanupLineItems && (
+                      <li className="flex items-center gap-2">
+                        <span className="text-red-500">•</span>
+                        <span className="font-semibold">
+                          ALL Line Items
+                        </span>{" "}
+                        from HubSpot
+                      </li>
+                    )}
+                  </ul>
+                  <div className="mt-4 rounded-md bg-red-500/20 p-3">
+                    <p className="text-sm font-semibold text-red-600">
+                      This action cannot be undone.
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Use this before re-running migrations to clean up test
+                      data.
+                    </p>
+                  </div>
+                </div>
+              ) : isLineItems ? (
                 <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
                   <div className="space-y-1">
                     <p className="text-sm text-muted-foreground">Line Items</p>
@@ -301,6 +407,30 @@ export default function MigrationPreview({
                       HubSpot Deals
                     </p>
                     <p className="text-xs text-muted-foreground">Line Items</p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Est. Time</p>
+                    <p className="text-2xl font-bold">{estimatedTime}</p>
+                    <p className="text-xs text-muted-foreground">Minutes</p>
+                  </div>
+                </div>
+              ) : isEventToMeeting ? (
+                <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Events</p>
+                    <p className="text-2xl font-bold text-primary">
+                      {previewData.totalCount}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      From Salesforce
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Target</p>
+                    <p className="text-2xl font-bold text-green-400">
+                      Meetings
+                    </p>
+                    <p className="text-xs text-muted-foreground">In HubSpot</p>
                   </div>
                   <div className="space-y-1">
                     <p className="text-sm text-muted-foreground">Est. Time</p>
@@ -454,7 +584,119 @@ export default function MigrationPreview({
               )}
 
               {/* Field Mappings or Association Details */}
-              {isLineItems ? (
+              {isCleanup ? (
+                <div>
+                  <h3 className="mb-3 font-semibold">Operation Details</h3>
+                  <div className="space-y-3 rounded-md border border-red-500/50 p-4">
+                    {isCleanupTasks && (
+                      <div className="flex items-start gap-3">
+                        <Badge
+                          variant="outline"
+                          className="border-red-500 text-red-600"
+                        >
+                          Tasks
+                        </Badge>
+                        <div>
+                          <p className="font-semibold">
+                            Delete All HubSpot Tasks
+                          </p>
+                          <p className="mt-1 text-sm text-muted-foreground">
+                            Searches for all tasks in HubSpot and deletes them
+                            in batches of 100
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                    {isCleanupMeetings && (
+                      <div className="flex items-start gap-3">
+                        <Badge
+                          variant="outline"
+                          className="border-red-500 text-red-600"
+                        >
+                          Meetings
+                        </Badge>
+                        <div>
+                          <p className="font-semibold">
+                            Delete All HubSpot Meetings
+                          </p>
+                          <p className="mt-1 text-sm text-muted-foreground">
+                            Searches for all meetings in HubSpot and deletes
+                            them in batches of 100
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                    {isCleanupLineItems && (
+                      <div className="flex items-start gap-3">
+                        <Badge
+                          variant="outline"
+                          className="border-red-500 text-red-600"
+                        >
+                          Line Items
+                        </Badge>
+                        <div>
+                          <p className="font-semibold">
+                            Delete All HubSpot Line Items
+                          </p>
+                          <p className="mt-1 text-sm text-muted-foreground">
+                            Searches for all line items in HubSpot and deletes
+                            them in batches of 100
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                    <div className="mt-3 rounded-md bg-yellow-500/10 p-3 text-sm border border-yellow-500/50">
+                      <p className="font-semibold text-yellow-600">Note:</p>
+                      <p className="mt-1 text-muted-foreground">
+                        This operation will continue looping until all
+                        engagement objects are deleted, regardless of the total
+                        count. This may take several minutes for large datasets.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ) : isEventToMeeting ? (
+                <div>
+                  <h3 className="mb-3 font-semibold">Migration Details</h3>
+                  <div className="space-y-3 rounded-md border p-4">
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Source</Badge>
+                      <div>
+                        <p className="font-semibold">Event (Salesforce)</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Calendar events and scheduled appointments
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Mapping</Badge>
+                      <div className="text-sm">
+                        <p className="font-semibold">Field Transformations</p>
+                        <ul className="mt-1 space-y-1 text-muted-foreground">
+                          <li>• Subject → hs_meeting_title</li>
+                          <li>• Description → hs_meeting_body</li>
+                          <li>• Location → hs_meeting_location</li>
+                          <li>• StartDateTime → hs_meeting_start_time</li>
+                          <li>• EndDateTime → hs_meeting_end_time</li>
+                          <li>• OwnerId → hubspot_owner_id (mapped)</li>
+                        </ul>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Associations</Badge>
+                      <div>
+                        <p className="font-semibold">
+                          Meetings (HubSpot Engagement)
+                        </p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Associated with Contacts (WhoId), Companies/Deals
+                          (WhatId), and mapped to HubSpot owners
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : isLineItems ? (
                 <div>
                   <h3 className="mb-3 font-semibold">Migration Details</h3>
                   <div className="space-y-3 rounded-md border p-4">
@@ -655,80 +897,92 @@ export default function MigrationPreview({
                     Records)
                   </h3>
                   <div className="space-y-4">
-                    {isLineItems
+                    {isEventToMeeting
                       ? previewData.sampleRecords.map((record, idx) => (
                           <Card key={record.Id}>
                             <CardHeader className="pb-3">
                               <CardTitle className="text-base">
-                                {record.Product2?.Name ||
-                                  `Line Item ${idx + 1}`}
+                                {record.Subject || `Event ${idx + 1}`}
                               </CardTitle>
                             </CardHeader>
                             <CardContent>
                               <div className="space-y-2">
                                 <div className="flex items-center gap-2">
-                                  <Badge variant="secondary">
-                                    Line Item ID
-                                  </Badge>
+                                  <Badge variant="secondary">Event ID</Badge>
                                   <span className="font-mono text-sm">
                                     {record.Id}
                                   </span>
                                 </div>
-                                <div className="flex items-center gap-2">
-                                  <Badge variant="secondary">
-                                    Opportunity ID
-                                  </Badge>
-                                  <span className="font-mono text-sm">
-                                    {record.OpportunityId || (
-                                      <span className="text-muted-foreground">
-                                        Not Set
-                                      </span>
-                                    )}
-                                  </span>
-                                </div>
+                                {record.Description && (
+                                  <div className="flex items-start gap-2">
+                                    <Badge variant="secondary">
+                                      Description
+                                    </Badge>
+                                    <span className="text-sm text-muted-foreground">
+                                      {record.Description.substring(0, 100)}
+                                      {record.Description.length > 100
+                                        ? "..."
+                                        : ""}
+                                    </span>
+                                  </div>
+                                )}
+                                {record.Location && (
+                                  <div className="flex items-center gap-2">
+                                    <Badge variant="secondary">Location</Badge>
+                                    <span className="text-sm">
+                                      {record.Location}
+                                    </span>
+                                  </div>
+                                )}
                                 <div className="grid grid-cols-2 gap-2 text-sm">
                                   <div>
                                     <span className="text-muted-foreground">
-                                      Quantity:
+                                      Start:
                                     </span>{" "}
-                                    {record.Quantity || "N/A"}
+                                    {record.StartDateTime
+                                      ? new Date(
+                                          record.StartDateTime,
+                                        ).toLocaleString()
+                                      : "N/A"}
                                   </div>
                                   <div>
                                     <span className="text-muted-foreground">
-                                      Price:
+                                      End:
                                     </span>{" "}
-                                    ${record.UnitPrice || 0}
-                                  </div>
-                                  <div>
-                                    <span className="text-muted-foreground">
-                                      Total:
-                                    </span>{" "}
-                                    ${record.TotalPrice || 0}
+                                    {record.EndDateTime
+                                      ? new Date(
+                                          record.EndDateTime,
+                                        ).toLocaleString()
+                                      : "N/A"}
                                   </div>
                                 </div>
                                 <div className="flex items-center gap-2">
-                                  <Badge variant="secondary">Dates</Badge>
+                                  <Badge variant="secondary">
+                                    Associations
+                                  </Badge>
                                   <span className="text-sm text-muted-foreground">
-                                    {record.Start_Date__c || "N/A"} →{" "}
-                                    {record.End_Date__c || "N/A"}
+                                    WhoId: {record.WhoId || "None"} | WhatId:{" "}
+                                    {record.WhatId || "None"}
                                   </span>
                                 </div>
                                 <div className="mt-3 rounded-md bg-muted/50 p-3 text-xs">
                                   <p className="text-muted-foreground">
-                                    Will be created as HubSpot line item and
-                                    associated with corresponding deal
+                                    Will be created as HubSpot Meeting and
+                                    associated with Contacts, Companies, and
+                                    Deals
                                   </p>
                                 </div>
                               </div>
                             </CardContent>
                           </Card>
                         ))
-                      : isOpportunityLineItemDates
+                      : isLineItems
                         ? previewData.sampleRecords.map((record, idx) => (
                             <Card key={record.Id}>
                               <CardHeader className="pb-3">
                                 <CardTitle className="text-base">
-                                  {record.Name || `Line Item ${idx + 1}`}
+                                  {record.Product2?.Name ||
+                                    `Line Item ${idx + 1}`}
                                 </CardTitle>
                               </CardHeader>
                               <CardContent>
@@ -753,53 +1007,56 @@ export default function MigrationPreview({
                                       )}
                                     </span>
                                   </div>
-                                  <div className="flex items-center gap-2">
-                                    <Badge variant="secondary">
-                                      Current Start Date
-                                    </Badge>
-                                    <span className="font-mono text-sm">
-                                      {record.Start_Date__c || (
-                                        <span className="text-muted-foreground">
-                                          Not Set
-                                        </span>
-                                      )}
-                                    </span>
+                                  <div className="grid grid-cols-2 gap-2 text-sm">
+                                    <div>
+                                      <span className="text-muted-foreground">
+                                        Quantity:
+                                      </span>{" "}
+                                      {record.Quantity || "N/A"}
+                                    </div>
+                                    <div>
+                                      <span className="text-muted-foreground">
+                                        Price:
+                                      </span>{" "}
+                                      ${record.UnitPrice || 0}
+                                    </div>
+                                    <div>
+                                      <span className="text-muted-foreground">
+                                        Total:
+                                      </span>{" "}
+                                      ${record.TotalPrice || 0}
+                                    </div>
                                   </div>
                                   <div className="flex items-center gap-2">
-                                    <Badge variant="secondary">
-                                      Current End Date
-                                    </Badge>
-                                    <span className="font-mono text-sm">
-                                      {record.End_Date__c || (
-                                        <span className="text-muted-foreground">
-                                          Not Set
-                                        </span>
-                                      )}
+                                    <Badge variant="secondary">Dates</Badge>
+                                    <span className="text-sm text-muted-foreground">
+                                      {record.Start_Date__c || "N/A"} →{" "}
+                                      {record.End_Date__c || "N/A"}
                                     </span>
                                   </div>
                                   <div className="mt-3 rounded-md bg-muted/50 p-3 text-xs">
                                     <p className="text-muted-foreground">
-                                      Will be updated based on associated Line
-                                      Item Schedule dates
+                                      Will be created as HubSpot line item and
+                                      associated with corresponding deal
                                     </p>
                                   </div>
                                 </div>
                               </CardContent>
                             </Card>
                           ))
-                        : isOpportunityProductDates
+                        : isOpportunityLineItemDates
                           ? previewData.sampleRecords.map((record, idx) => (
                               <Card key={record.Id}>
                                 <CardHeader className="pb-3">
                                   <CardTitle className="text-base">
-                                    {record.Name || `Opportunity ${idx + 1}`}
+                                    {record.Name || `Line Item ${idx + 1}`}
                                   </CardTitle>
                                 </CardHeader>
                                 <CardContent>
                                   <div className="space-y-2">
                                     <div className="flex items-center gap-2">
                                       <Badge variant="secondary">
-                                        Opportunity ID
+                                        Line Item ID
                                       </Badge>
                                       <span className="font-mono text-sm">
                                         {record.Id}
@@ -807,10 +1064,22 @@ export default function MigrationPreview({
                                     </div>
                                     <div className="flex items-center gap-2">
                                       <Badge variant="secondary">
+                                        Opportunity ID
+                                      </Badge>
+                                      <span className="font-mono text-sm">
+                                        {record.OpportunityId || (
+                                          <span className="text-muted-foreground">
+                                            Not Set
+                                          </span>
+                                        )}
+                                      </span>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <Badge variant="secondary">
                                         Current Start Date
                                       </Badge>
                                       <span className="font-mono text-sm">
-                                        {record.Product_Start_Date__c || (
+                                        {record.Start_Date__c || (
                                           <span className="text-muted-foreground">
                                             Not Set
                                           </span>
@@ -822,7 +1091,7 @@ export default function MigrationPreview({
                                         Current End Date
                                       </Badge>
                                       <span className="font-mono text-sm">
-                                        {record.Product_End_Date__c || (
+                                        {record.End_Date__c || (
                                           <span className="text-muted-foreground">
                                             Not Set
                                           </span>
@@ -839,12 +1108,12 @@ export default function MigrationPreview({
                                 </CardContent>
                               </Card>
                             ))
-                          : isAssociationMigration
+                          : isOpportunityProductDates
                             ? previewData.sampleRecords.map((record, idx) => (
                                 <Card key={record.Id}>
                                   <CardHeader className="pb-3">
                                     <CardTitle className="text-base">
-                                      Opportunity {idx + 1}
+                                      {record.Name || `Opportunity ${idx + 1}`}
                                     </CardTitle>
                                   </CardHeader>
                                   <CardContent>
@@ -859,80 +1128,132 @@ export default function MigrationPreview({
                                       </div>
                                       <div className="flex items-center gap-2">
                                         <Badge variant="secondary">
-                                          {migrationType ===
-                                          "opportunity_renewal_associations"
-                                            ? "Renews In"
-                                            : "Has Pilot"}
+                                          Current Start Date
                                         </Badge>
                                         <span className="font-mono text-sm">
-                                          {migrationType ===
-                                          "opportunity_renewal_associations"
-                                            ? record.renewal_opportunity__c
-                                            : record.Pilot_Opportunity__c}
+                                          {record.Product_Start_Date__c || (
+                                            <span className="text-muted-foreground">
+                                              Not Set
+                                            </span>
+                                          )}
+                                        </span>
+                                      </div>
+                                      <div className="flex items-center gap-2">
+                                        <Badge variant="secondary">
+                                          Current End Date
+                                        </Badge>
+                                        <span className="font-mono text-sm">
+                                          {record.Product_End_Date__c || (
+                                            <span className="text-muted-foreground">
+                                              Not Set
+                                            </span>
+                                          )}
                                         </span>
                                       </div>
                                       <div className="mt-3 rounded-md bg-muted/50 p-3 text-xs">
                                         <p className="text-muted-foreground">
-                                          Will create bidirectional association
-                                          between deals with these Salesforce
-                                          IDs
+                                          Will be updated based on associated
+                                          Line Item Schedule dates
                                         </p>
                                       </div>
                                     </div>
                                   </CardContent>
                                 </Card>
                               ))
-                            : previewData.sampleRecords.map((record, idx) => (
-                                <Card key={record.Id}>
-                                  <CardHeader className="pb-3">
-                                    <CardTitle className="text-base">
-                                      Record {idx + 1}
-                                    </CardTitle>
-                                  </CardHeader>
-                                  <CardContent>
-                                    <div className="space-y-2">
-                                      {fieldMappings.map((mapping) => {
-                                        const sfValue =
-                                          record[mapping.salesforceField];
-                                        return (
-                                          <div
-                                            key={mapping.salesforceField}
-                                            className="flex items-start border-b border-border/50 pb-2 last:border-0"
-                                          >
-                                            <div className="flex-1">
-                                              <p className="text-xs text-muted-foreground">
-                                                {mapping.salesforceField}
-                                              </p>
-                                              <p className="font-medium">
-                                                {sfValue || (
-                                                  <span className="text-muted-foreground">
-                                                    null
-                                                  </span>
-                                                )}
-                                              </p>
+                            : isAssociationMigration
+                              ? previewData.sampleRecords.map((record, idx) => (
+                                  <Card key={record.Id}>
+                                    <CardHeader className="pb-3">
+                                      <CardTitle className="text-base">
+                                        Opportunity {idx + 1}
+                                      </CardTitle>
+                                    </CardHeader>
+                                    <CardContent>
+                                      <div className="space-y-2">
+                                        <div className="flex items-center gap-2">
+                                          <Badge variant="secondary">
+                                            Opportunity ID
+                                          </Badge>
+                                          <span className="font-mono text-sm">
+                                            {record.Id}
+                                          </span>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                          <Badge variant="secondary">
+                                            {migrationType ===
+                                            "opportunity_renewal_associations"
+                                              ? "Renews In"
+                                              : "Has Pilot"}
+                                          </Badge>
+                                          <span className="font-mono text-sm">
+                                            {migrationType ===
+                                            "opportunity_renewal_associations"
+                                              ? record.renewal_opportunity__c
+                                              : record.Pilot_Opportunity__c}
+                                          </span>
+                                        </div>
+                                        <div className="mt-3 rounded-md bg-muted/50 p-3 text-xs">
+                                          <p className="text-muted-foreground">
+                                            Will create bidirectional
+                                            association between deals with these
+                                            Salesforce IDs
+                                          </p>
+                                        </div>
+                                      </div>
+                                    </CardContent>
+                                  </Card>
+                                ))
+                              : previewData.sampleRecords.map((record, idx) => (
+                                  <Card key={record.Id}>
+                                    <CardHeader className="pb-3">
+                                      <CardTitle className="text-base">
+                                        Record {idx + 1}
+                                      </CardTitle>
+                                    </CardHeader>
+                                    <CardContent>
+                                      <div className="space-y-2">
+                                        {fieldMappings.map((mapping) => {
+                                          const sfValue =
+                                            record[mapping.salesforceField];
+                                          return (
+                                            <div
+                                              key={mapping.salesforceField}
+                                              className="flex items-start border-b border-border/50 pb-2 last:border-0"
+                                            >
+                                              <div className="flex-1">
+                                                <p className="text-xs text-muted-foreground">
+                                                  {mapping.salesforceField}
+                                                </p>
+                                                <p className="font-medium">
+                                                  {sfValue || (
+                                                    <span className="text-muted-foreground">
+                                                      null
+                                                    </span>
+                                                  )}
+                                                </p>
+                                              </div>
+                                              <div className="px-2 text-muted-foreground">
+                                                →
+                                              </div>
+                                              <div className="flex-1">
+                                                <p className="text-xs text-muted-foreground">
+                                                  {mapping.hubspotField}
+                                                </p>
+                                                <p className="font-medium">
+                                                  {sfValue || (
+                                                    <span className="text-muted-foreground">
+                                                      null
+                                                    </span>
+                                                  )}
+                                                </p>
+                                              </div>
                                             </div>
-                                            <div className="px-2 text-muted-foreground">
-                                              →
-                                            </div>
-                                            <div className="flex-1">
-                                              <p className="text-xs text-muted-foreground">
-                                                {mapping.hubspotField}
-                                              </p>
-                                              <p className="font-medium">
-                                                {sfValue || (
-                                                  <span className="text-muted-foreground">
-                                                    null
-                                                  </span>
-                                                )}
-                                              </p>
-                                            </div>
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
-                                  </CardContent>
-                                </Card>
-                              ))}
+                                          );
+                                        })}
+                                      </div>
+                                    </CardContent>
+                                  </Card>
+                                ))}
                   </div>
                 </div>
               )}

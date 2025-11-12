@@ -185,6 +185,28 @@ class SalesforceExtractor {
   }
 
   /**
+   * Extract EventRelations for a set of Event IDs
+   */
+  async extractEventRelations(eventIds: string[]): Promise<any[]> {
+    if (!this.connection) {
+      throw new Error("Not connected to Salesforce");
+    }
+
+    if (eventIds.length === 0) {
+      return [];
+    }
+
+    const query = `
+      SELECT Id, EventId, RelationId, IsWhat, IsInvitee, IsParent, Status
+      FROM EventRelation
+      WHERE EventId IN (${eventIds.map((id) => `'${id}'`).join(",")})
+    `;
+
+    const result = await this.connection.query(query);
+    return result.records;
+  }
+
+  /**
    * Extract EmailMessages (rich email content)
    */
   async extractEmailMessages(

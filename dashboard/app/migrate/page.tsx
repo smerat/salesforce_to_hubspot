@@ -19,10 +19,14 @@ type MigrationType =
   | "account_to_company"
   | "opportunity_renewal_associations"
   | "pilot_opportunity_associations"
+  | "event_to_meeting_migration"
   | "opportunity_product_dates"
   | "sync_deal_contract_dates"
   | "opportunity_line_item_dates"
-  | "line_items";
+  | "line_items"
+  | "cleanup_tasks"
+  | "cleanup_meetings"
+  | "cleanup_line_items";
 
 export default function MigratePage() {
   const router = useRouter();
@@ -31,6 +35,81 @@ export default function MigratePage() {
     useState<MigrationType>("account_to_company");
   const [fieldMappings, setFieldMappings] = useState<FieldMapping[]>([]);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isDeletingMeetings, setIsDeletingMeetings] = useState(false);
+  const [isDeletingTasks, setIsDeletingTasks] = useState(false);
+
+  async function handleDeleteAllTasks() {
+    if (
+      !confirm(
+        "Are you sure you want to delete ALL tasks from HubSpot? This action cannot be undone.",
+      )
+    ) {
+      return;
+    }
+
+    setIsDeletingTasks(true);
+
+    try {
+      const response = await fetch("/api/delete-tasks", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.error || "Failed to delete tasks");
+      }
+
+      alert(
+        result.message || `Successfully deleted ${result.deletedCount} tasks`,
+      );
+    } catch (err: any) {
+      console.error("Error deleting tasks:", err);
+      alert("Error: " + err.message);
+    } finally {
+      setIsDeletingTasks(false);
+    }
+  }
+
+  async function handleDeleteAllMeetings() {
+    if (
+      !confirm(
+        "Are you sure you want to delete ALL meetings from HubSpot? This action cannot be undone.",
+      )
+    ) {
+      return;
+    }
+
+    setIsDeletingMeetings(true);
+
+    try {
+      const response = await fetch("/api/delete-meetings", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.error || "Failed to delete meetings");
+      }
+
+      alert(
+        result.message ||
+          `Successfully deleted ${result.deletedCount} meetings`,
+      );
+    } catch (err: any) {
+      console.error("Error deleting meetings:", err);
+      alert("Error: " + err.message);
+    } finally {
+      setIsDeletingMeetings(false);
+    }
+  }
 
   async function handleDeleteAllLineItems() {
     if (
@@ -123,6 +202,8 @@ export default function MigratePage() {
         return "Opportunity Renewal Associations migration";
       case "pilot_opportunity_associations":
         return "Pilot Opportunity Associations migration";
+      case "event_to_meeting_migration":
+        return "Event to Meeting migration";
       case "opportunity_product_dates":
         return "Opportunity Product Dates migration";
       case "sync_deal_contract_dates":
@@ -131,6 +212,12 @@ export default function MigratePage() {
         return "OpportunityLineItem Dates migration";
       case "line_items":
         return "OpportunityLineItem to Deal Line Items migration";
+      case "cleanup_tasks":
+        return "Cleanup HubSpot Tasks";
+      case "cleanup_meetings":
+        return "Cleanup HubSpot Meetings";
+      case "cleanup_line_items":
+        return "Cleanup HubSpot Line Items";
       default:
         return "Migration";
     }
@@ -200,6 +287,62 @@ export default function MigratePage() {
             </CardHeader>
             <CardContent>
               <div className="space-y-3">
+                {/* Utility Section */}
+                <div className="mb-4 rounded-lg border-2 border-red-500/50 bg-red-500/5 p-4">
+                  <h3 className="mb-2 text-sm font-semibold text-red-600">
+                    🧹 Cleanup Utilities
+                  </h3>
+                  <div className="space-y-2">
+                    <button
+                      onClick={() => {
+                        setMigrationType("cleanup_tasks");
+                        setStep("preview");
+                      }}
+                      className="w-full rounded-lg border-2 border-red-500 bg-red-500/10 p-3 text-left transition-all hover:bg-red-500/20"
+                    >
+                      <h4 className="text-sm font-semibold text-red-600">
+                        Delete All Tasks
+                      </h4>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        ⚠️ Removes ALL tasks from HubSpot
+                      </p>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setMigrationType("cleanup_meetings");
+                        setStep("preview");
+                      }}
+                      className="w-full rounded-lg border-2 border-red-500 bg-red-500/10 p-3 text-left transition-all hover:bg-red-500/20"
+                    >
+                      <h4 className="text-sm font-semibold text-red-600">
+                        Delete All Meetings
+                      </h4>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        ⚠️ Removes ALL meetings from HubSpot
+                      </p>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setMigrationType("cleanup_line_items");
+                        setStep("preview");
+                      }}
+                      className="w-full rounded-lg border-2 border-red-500 bg-red-500/10 p-3 text-left transition-all hover:bg-red-500/20"
+                    >
+                      <h4 className="text-sm font-semibold text-red-600">
+                        Delete All Line Items
+                      </h4>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        ⚠️ Removes ALL line items from HubSpot
+                      </p>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Migrations Section */}
+                <h3 className="mb-2 text-sm font-semibold text-muted-foreground">
+                  Data Migrations
+                </h3>
+
                 <button
                   onClick={() => {
                     setMigrationType("account_to_company");
@@ -245,6 +388,22 @@ export default function MigratePage() {
                   <p className="mt-1 text-sm text-muted-foreground">
                     Create deal-to-deal associations for pilot opportunities
                     based on Salesforce Pilot_Opportunity__c field
+                  </p>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setMigrationType("event_to_meeting_migration");
+                    setStep("preview");
+                  }}
+                  className="w-full rounded-lg border-2 border-border bg-background p-6 text-left transition-all hover:border-primary/50 hover:bg-primary/5"
+                >
+                  <h3 className="text-lg font-semibold">
+                    Events to Meetings (Salesforce → HubSpot)
+                  </h3>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Migrate Salesforce Events to HubSpot Meeting engagements
+                    with associations to Contacts, Companies, and Deals
                   </p>
                 </button>
 
@@ -315,16 +474,9 @@ export default function MigratePage() {
                 </button>
               </div>
 
-              <div className="mt-6 flex justify-between">
+              <div className="mt-6 flex justify-start">
                 <Button onClick={() => router.push("/")} variant="outline">
                   Cancel
-                </Button>
-                <Button
-                  onClick={handleDeleteAllLineItems}
-                  variant="destructive"
-                  disabled={isDeleting}
-                >
-                  {isDeleting ? "Deleting..." : "Delete All HubSpot Line Items"}
                 </Button>
               </div>
             </CardContent>

@@ -10,7 +10,10 @@ export type ObjectType =
   | "opportunity_product_dates"
   | "sync_deal_contract_dates"
   | "opportunity_line_item_dates"
-  | "line_items";
+  | "line_items"
+  | "cleanup_tasks"
+  | "cleanup_meetings"
+  | "cleanup_line_items";
 
 export type MigrationStatus =
   | "queued"
