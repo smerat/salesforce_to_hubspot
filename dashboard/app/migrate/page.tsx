@@ -20,12 +20,17 @@ type MigrationType =
   | "opportunity_renewal_associations"
   | "pilot_opportunity_associations"
   | "event_to_meeting_migration"
+  | "call_migration_from_excel"
+  | "email_migration_from_excel"
+  | "meeting_migration_from_excel"
+  | "task_migration_from_excel"
   | "opportunity_product_dates"
   | "sync_deal_contract_dates"
   | "opportunity_line_item_dates"
   | "line_items"
   | "cleanup_tasks"
   | "cleanup_meetings"
+  | "cleanup_emails"
   | "cleanup_line_items";
 
 export default function MigratePage() {
@@ -36,6 +41,7 @@ export default function MigratePage() {
   const [fieldMappings, setFieldMappings] = useState<FieldMapping[]>([]);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isDeletingMeetings, setIsDeletingMeetings] = useState(false);
+  const [isDeletingEmails, setIsDeletingEmails] = useState(false);
   const [isDeletingTasks, setIsDeletingTasks] = useState(false);
 
   async function handleDeleteAllTasks() {
@@ -108,6 +114,42 @@ export default function MigratePage() {
       alert("Error: " + err.message);
     } finally {
       setIsDeletingMeetings(false);
+    }
+  }
+
+  async function handleDeleteAllEmails() {
+    if (
+      !confirm(
+        "Are you sure you want to delete ALL emails from HubSpot? This action cannot be undone.",
+      )
+    ) {
+      return;
+    }
+
+    setIsDeletingEmails(true);
+
+    try {
+      const response = await fetch("/api/delete-emails", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.error || "Failed to delete emails");
+      }
+
+      alert(
+        result.message || `Successfully deleted ${result.deletedCount} emails`,
+      );
+    } catch (err: any) {
+      console.error("Error deleting emails:", err);
+      alert("Error: " + err.message);
+    } finally {
+      setIsDeletingEmails(false);
     }
   }
 
@@ -204,6 +246,14 @@ export default function MigratePage() {
         return "Pilot Opportunity Associations migration";
       case "event_to_meeting_migration":
         return "Event to Meeting migration";
+      case "call_migration_from_excel":
+        return "Call migration from Excel files";
+      case "email_migration_from_excel":
+        return "Email migration from Excel files";
+      case "meeting_migration_from_excel":
+        return "Meeting migration from Excel files";
+      case "task_migration_from_excel":
+        return "Task migration from Excel files";
       case "opportunity_product_dates":
         return "Opportunity Product Dates migration";
       case "sync_deal_contract_dates":
@@ -216,6 +266,8 @@ export default function MigratePage() {
         return "Cleanup HubSpot Tasks";
       case "cleanup_meetings":
         return "Cleanup HubSpot Meetings";
+      case "cleanup_emails":
+        return "Cleanup HubSpot Emails";
       case "cleanup_line_items":
         return "Cleanup HubSpot Line Items";
       default:
@@ -323,6 +375,20 @@ export default function MigratePage() {
                     </button>
                     <button
                       onClick={() => {
+                        setMigrationType("cleanup_emails");
+                        setStep("preview");
+                      }}
+                      className="w-full rounded-lg border-2 border-red-500 bg-red-500/10 p-3 text-left transition-all hover:bg-red-500/20"
+                    >
+                      <h4 className="text-sm font-semibold text-red-600">
+                        Delete All Emails
+                      </h4>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        ⚠️ Removes ALL emails from HubSpot
+                      </p>
+                    </button>
+                    <button
+                      onClick={() => {
                         setMigrationType("cleanup_line_items");
                         setStep("preview");
                       }}
@@ -404,6 +470,74 @@ export default function MigratePage() {
                   <p className="mt-1 text-sm text-muted-foreground">
                     Migrate Salesforce Events to HubSpot Meeting engagements
                     with associations to Contacts, Companies, and Deals
+                  </p>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setMigrationType("call_migration_from_excel");
+                    setStep("preview");
+                  }}
+                  className="w-full rounded-lg border-2 border-border bg-background p-6 text-left transition-all hover:border-primary/50 hover:bg-primary/5"
+                >
+                  <h3 className="text-lg font-semibold">
+                    📞 Calls from Excel Files (Excel → HubSpot)
+                  </h3>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Migrate Salesforce Call/Task activities from Excel files to
+                    HubSpot Call engagements with associations to Contacts,
+                    Companies, and Deals (~2,800 calls)
+                  </p>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setMigrationType("email_migration_from_excel");
+                    setStep("preview");
+                  }}
+                  className="w-full rounded-lg border-2 border-border bg-background p-6 text-left transition-all hover:border-primary/50 hover:bg-primary/5"
+                >
+                  <h3 className="text-lg font-semibold">
+                    📧 Emails from Excel Files (Excel → HubSpot)
+                  </h3>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Migrate Salesforce Email activities from Excel files to
+                    HubSpot Email engagements with associations to Contacts,
+                    Companies, and Deals (~4,000-5,000 emails)
+                  </p>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setMigrationType("meeting_migration_from_excel");
+                    setStep("preview");
+                  }}
+                  className="w-full rounded-lg border-2 border-border bg-background p-6 text-left transition-all hover:border-primary/50 hover:bg-primary/5"
+                >
+                  <h3 className="text-lg font-semibold">
+                    📅 Meetings from Excel Files (Excel → HubSpot)
+                  </h3>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Migrate Salesforce Meeting/Event activities from Excel files
+                    to HubSpot Meeting engagements with associations to
+                    Contacts, Companies, and Deals (~1,400 meetings)
+                  </p>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setMigrationType("task_migration_from_excel");
+                    setStep("preview");
+                  }}
+                  className="w-full rounded-lg border-2 border-border bg-background p-6 text-left transition-all hover:border-primary/50 hover:bg-primary/5"
+                >
+                  <h3 className="text-lg font-semibold">
+                    📋 Tasks from Excel Files (Excel → HubSpot)
+                  </h3>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Migrate Salesforce Task activities from Excel files to
+                    HubSpot Task engagements with associations to Contacts,
+                    Companies, and Deals (~53 tasks)
                   </p>
                 </button>
 

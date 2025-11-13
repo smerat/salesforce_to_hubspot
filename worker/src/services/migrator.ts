@@ -1,9 +1,12 @@
+import path from "path";
 import logger from "../utils/logger";
 import config from "../config";
 import database from "./database";
 import salesforceExtractor from "../extractors/salesforce";
 import hubspotLoader from "../loaders/hubspot";
 import ownerMapper from "./owner-mapper";
+import excelReader from "../utils/excel-reader";
+import { convertTo18CharId } from "../utils/salesforce-id-converter";
 import { ObjectType, MigrationRun, SalesforceRecord } from "../types";
 
 interface FieldMapping {
@@ -106,8 +109,18 @@ class Migrator {
         await this.cleanupHubSpotTasks();
       } else if (migrationType === "cleanup_meetings") {
         await this.cleanupHubSpotMeetings();
+      } else if (migrationType === "cleanup_emails") {
+        await this.cleanupHubSpotEmails();
       } else if (migrationType === "cleanup_line_items") {
         await this.cleanupHubSpotLineItems();
+      } else if (migrationType === "call_migration_from_excel") {
+        await this.migrateCallsFromExcel(testMode, testModeLimit);
+      } else if (migrationType === "email_migration_from_excel") {
+        await this.migrateEmailsFromExcel(testMode, testModeLimit);
+      } else if (migrationType === "meeting_migration_from_excel") {
+        await this.migrateMeetingsFromExcel(testMode, testModeLimit);
+      } else if (migrationType === "task_migration_from_excel") {
+        await this.migrateTasksFromExcel(testMode, testModeLimit);
       } else {
         throw new Error(`Unknown migration type: ${migrationType}`);
       }
@@ -211,6 +224,7 @@ class Migrator {
 
       let lastId: string | undefined;
       let processedCount = 0;
+      let failedCount = 0;
       let hasMore = true;
 
       while (hasMore && !this.shouldStop) {
@@ -2576,7 +2590,7 @@ class Migrator {
               hs_product_id: "", // Will be left empty for now
             };
 
-            // Map fields
+            // Map basic fields
             if (lineItem.Start_Date__c) {
               properties.start_date = lineItem.Start_Date__c;
             }
@@ -2584,25 +2598,64 @@ class Migrator {
               properties.end_date = lineItem.End_Date__c;
             }
             if (
-              lineItem.installments__c !== undefined &&
-              lineItem.installments__c !== null
-            ) {
-              properties.installments = lineItem.installments__c.toString();
-            }
-            if (
               lineItem.TotalPrice !== undefined &&
               lineItem.TotalPrice !== null
             ) {
               properties.amount = lineItem.TotalPrice.toString();
-            }
-            if (lineItem.Quantity !== undefined && lineItem.Quantity !== null) {
-              properties.quantity = lineItem.Quantity.toString();
             }
             if (
               lineItem.UnitPrice !== undefined &&
               lineItem.UnitPrice !== null
             ) {
               properties.price = lineItem.UnitPrice.toString();
+            }
+
+            // Handle recurring billing fields
+            if (
+              lineItem.installments__c !== undefined &&
+              lineItem.installments__c !== null &&
+              lineItem.installments__c > 0
+            ) {
+              // 1. Keep installments as-is
+              properties.installments = lineItem.installments__c.toString();
+
+              // 2. Set recurring billing period in ISO-8601 format (P{n}M)
+              properties.hs_recurring_billing_period = `P${lineItem.installments__c}M`;
+
+              // 3. Set recurring billing start date (same as start_date)
+              if (lineItem.Start_Date__c) {
+                properties.hs_recurring_billing_start_date =
+                  lineItem.Start_Date__c;
+              }
+
+              // 4. Set recurring billing end date (same as end_date)
+              if (lineItem.End_Date__c) {
+                properties.hs_recurring_billing_end_date = lineItem.End_Date__c;
+              }
+
+              // 5. Set billing frequency to monthly (lowercase)
+              properties.recurringbillingfrequency = "monthly";
+
+              // Set product type to service (lowercase)
+              properties.hs_product_type = "service";
+
+              // Calculate quantity per period (total quantity / installments)
+              if (
+                lineItem.Quantity !== undefined &&
+                lineItem.Quantity !== null
+              ) {
+                const quantityPerPeriod =
+                  lineItem.Quantity / lineItem.installments__c;
+                properties.quantity = quantityPerPeriod.toString();
+              }
+            } else {
+              // One-time purchase or no installments
+              if (
+                lineItem.Quantity !== undefined &&
+                lineItem.Quantity !== null
+              ) {
+                properties.quantity = lineItem.Quantity.toString();
+              }
             }
 
             lineItemsToCreate.push({
@@ -2914,6 +2967,62 @@ class Migrator {
   }
 
   /**
+   * Cleanup HubSpot Emails
+   */
+  private async cleanupHubSpotEmails(): Promise<void> {
+    if (!this.runId) {
+      throw new Error("No active migration run");
+    }
+
+    const objectType: ObjectType = "cleanup_emails";
+
+    logger.info("🧹 Starting HubSpot Emails Cleanup");
+
+    try {
+      await database.createMigrationProgress(
+        this.runId,
+        objectType,
+        "in_progress",
+      );
+      await database.updateMigrationProgress(this.runId, objectType, {
+        started_at: new Date(),
+      });
+
+      logger.info("Deleting all Emails from HubSpot...");
+      const emailsDeleted = await hubspotLoader.deleteAllEmails();
+      logger.info(`✅ Deleted ${emailsDeleted} emails`);
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "completed",
+        completed_at: new Date(),
+        processed_records: emailsDeleted,
+      });
+
+      await database.createAuditLog(
+        this.runId,
+        "object_migration_completed",
+        objectType,
+        emailsDeleted,
+      );
+
+      logger.info(
+        `✅ Emails cleanup completed: ${emailsDeleted} emails deleted`,
+      );
+    } catch (error: any) {
+      logger.error("❌ Failed to cleanup HubSpot emails", {
+        error: error.message,
+      });
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "failed",
+        completed_at: new Date(),
+      });
+
+      throw error;
+    }
+  }
+
+  /**
    * Cleanup HubSpot Line Items
    */
   private async cleanupHubSpotLineItems(): Promise<void> {
@@ -2963,6 +3072,1686 @@ class Migrator {
       await database.updateMigrationProgress(this.runId, objectType, {
         status: "failed",
         completed_at: new Date(),
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * Migrate Calls from Excel files to HubSpot
+   */
+  private async migrateCallsFromExcel(
+    testMode: boolean = false,
+    testModeLimit: number = 5,
+  ): Promise<void> {
+    if (!this.runId) {
+      throw new Error("No active migration run");
+    }
+
+    const objectType: ObjectType = "activities";
+
+    logger.info("📦 Starting Call migration from Excel files");
+
+    try {
+      // Create progress tracking
+      await database.createMigrationProgress(
+        this.runId,
+        objectType,
+        "in_progress",
+      );
+      await database.updateMigrationProgress(this.runId, objectType, {
+        started_at: new Date(),
+      });
+
+      // Step 1: Read all Excel files
+      logger.info("Step 1: Reading Excel files...");
+      const contactsPath =
+        "../data/call-data/Calls - Contacts-Migration List.xlsx";
+      const accountsPath =
+        "../data/call-data/Calls - Accounts- Migration List.xlsx";
+      const opportunitiesPath =
+        "../data/call-data/Calls - Opportunities-Migration List.xlsx";
+
+      const allRecords = excelReader.readAllFiles(
+        contactsPath,
+        accountsPath,
+        opportunitiesPath,
+      );
+
+      logger.info(`Total records read: ${allRecords.length}`);
+
+      // Step 2: Group by Activity ID
+      logger.info("Step 2: Grouping records by Activity ID...");
+      const groupedRecords = excelReader.groupByActivityId(allRecords);
+
+      const totalUniqueCalls = groupedRecords.size;
+      const callsToMigrate = testMode
+        ? Math.min(testModeLimit, totalUniqueCalls)
+        : totalUniqueCalls;
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        total_records: callsToMigrate,
+      });
+
+      // Limit the records to process in test mode
+      let recordsToProcess: Map<string, any[]>;
+      if (testMode) {
+        logger.info(
+          `🧪 TEST MODE: Will process ${callsToMigrate} of ${totalUniqueCalls} unique calls`,
+        );
+        // Take only the first N entries from the map
+        recordsToProcess = new Map(
+          Array.from(groupedRecords.entries()).slice(0, testModeLimit),
+        );
+      } else {
+        logger.info(`Total unique calls to migrate: ${totalUniqueCalls}`);
+        recordsToProcess = groupedRecords;
+      }
+
+      // Step 3: Collect Salesforce IDs for bulk lookup (only from records we'll process)
+      logger.info("Step 3: Collecting Salesforce IDs for bulk lookup...");
+      const contactIds = new Set<string>();
+      const accountIds = new Set<string>();
+      const opportunityIds = new Set<string>();
+      const ownerNames = new Set<string>();
+
+      for (const records of recordsToProcess.values()) {
+        for (const record of records) {
+          // Convert 15-char Salesforce IDs to 18-char format for HubSpot lookup
+          const salesforceId18 = convertTo18CharId(record.salesforceId);
+
+          if (record.objectType === "contact") {
+            contactIds.add(salesforceId18);
+          } else if (record.objectType === "company") {
+            accountIds.add(salesforceId18);
+          } else if (record.objectType === "deal") {
+            opportunityIds.add(salesforceId18);
+          }
+
+          if (record.owner) {
+            ownerNames.add(record.owner);
+          }
+        }
+      }
+
+      logger.info("Collected Salesforce IDs", {
+        contacts: contactIds.size,
+        accounts: accountIds.size,
+        opportunities: opportunityIds.size,
+        owners: ownerNames.size,
+      });
+
+      // Debug: Log sample IDs (now converted to 18-char format)
+      console.log("\n=== Sample Salesforce IDs (converted to 18-char) ===");
+      console.log("Contact IDs (first 5):", Array.from(contactIds).slice(0, 5));
+      console.log("Account IDs (first 5):", Array.from(accountIds).slice(0, 5));
+      console.log(
+        "Opportunity IDs (first 5):",
+        Array.from(opportunityIds).slice(0, 5),
+      );
+      console.log(
+        "\nNote: 15-char IDs automatically converted to 18-char format for HubSpot lookup",
+      );
+
+      // Step 4: Bulk lookup HubSpot objects
+      // Run sequentially to avoid rate limit issues
+      logger.info("Step 4: Bulk lookup HubSpot objects by Salesforce IDs...");
+
+      const contactMappings =
+        contactIds.size > 0
+          ? await hubspotLoader.bulkFindObjectsBySalesforceIds(
+              "contacts",
+              Array.from(contactIds),
+            )
+          : new Map<string, string>();
+
+      const companyMappings =
+        accountIds.size > 0
+          ? await hubspotLoader.bulkFindObjectsBySalesforceIds(
+              "companies",
+              Array.from(accountIds),
+            )
+          : new Map<string, string>();
+
+      const dealMappings =
+        opportunityIds.size > 0
+          ? await hubspotLoader.bulkFindObjectsBySalesforceIds(
+              "deals",
+              Array.from(opportunityIds),
+            )
+          : new Map<string, string>();
+
+      logger.info("HubSpot object lookup results", {
+        contactsFound: contactMappings.size,
+        companiesFound: companyMappings.size,
+        dealsFound: dealMappings.size,
+      });
+
+      // Check for missing IDs and report them
+      const missingContacts = Array.from(contactIds).filter(
+        (id) => !contactMappings.has(id),
+      );
+      const missingCompanies = Array.from(accountIds).filter(
+        (id) => !companyMappings.has(id),
+      );
+      const missingDeals = Array.from(opportunityIds).filter(
+        (id) => !dealMappings.has(id),
+      );
+
+      if (
+        missingContacts.length > 0 ||
+        missingCompanies.length > 0 ||
+        missingDeals.length > 0
+      ) {
+        console.log("\n❌ === MISSING HUBSPOT OBJECTS ===");
+
+        if (missingContacts.length > 0) {
+          console.log(
+            `\nMissing Contacts (${missingContacts.length}/${contactIds.size}):`,
+          );
+          console.log(missingContacts);
+        }
+
+        if (missingCompanies.length > 0) {
+          console.log(
+            `\nMissing Companies (${missingCompanies.length}/${accountIds.size}):`,
+          );
+          console.log(missingCompanies);
+        }
+
+        if (missingDeals.length > 0) {
+          console.log(
+            `\nMissing Deals (${missingDeals.length}/${opportunityIds.size}):`,
+          );
+          console.log(missingDeals);
+        }
+
+        console.log("\n=================================\n");
+      }
+
+      // Step 5: Initialize owner mapper and get Sean Merat's owner ID as fallback
+      logger.info("Step 5: Initializing owner mapper...");
+      const connection = salesforceExtractor.getConnection();
+      if (!connection) {
+        throw new Error("Salesforce connection not available");
+      }
+      await ownerMapper.initialize(connection, this.runId);
+
+      // Get Sean Merat's HubSpot owner ID as fallback
+      const seanMeratOwnerId =
+        await ownerMapper.getHubSpotOwnerIdByName("Sean Merat");
+      if (!seanMeratOwnerId) {
+        logger.warn(
+          "Sean Merat not found in owner mappings, will use null for unmapped owners",
+        );
+      } else {
+        logger.info("Using Sean Merat as fallback owner", {
+          ownerId: seanMeratOwnerId,
+        });
+      }
+
+      // Step 6: Build calls with associations
+      logger.info("Step 6: Building calls with associations...");
+
+      const callsToCreate: Array<{
+        activityId: string;
+        properties: Record<string, any>;
+        associations: any[];
+      }> = [];
+
+      let processedCount = 0;
+      const totalToProcess = recordsToProcess.size;
+
+      for (const [activityId, records] of recordsToProcess) {
+        if (this.shouldStop) break;
+
+        processedCount++;
+
+        // Log progress every 100 calls
+        if (processedCount % 100 === 0 || processedCount === totalToProcess) {
+          logger.info(
+            `Building calls: ${processedCount}/${totalToProcess} (${((processedCount / totalToProcess) * 100).toFixed(1)}%)`,
+          );
+        }
+
+        // Use the first record for call properties (all should have same data for same activity)
+        const firstRecord = records[0];
+
+        // Build call properties
+        const properties: Record<string, any> = {
+          hs_timestamp: excelReader.parseTimestampForHubSpot(
+            firstRecord.timestamp,
+          ),
+          hs_call_title: firstRecord.title || "Call",
+          hs_call_body: firstRecord.body || "",
+          hs_call_status: firstRecord.status || "COMPLETED",
+        };
+
+        // Map owner
+        let ownerId = null;
+        if (firstRecord.owner) {
+          ownerId = await ownerMapper.getHubSpotOwnerIdByName(
+            firstRecord.owner,
+          );
+          if (!ownerId) {
+            logger.debug("Owner not found, using fallback", {
+              ownerName: firstRecord.owner,
+              activityId,
+            });
+            ownerId = seanMeratOwnerId;
+          }
+        }
+
+        if (ownerId) {
+          properties.hubspot_owner_id = ownerId;
+        }
+
+        // Build associations array
+        const associations: any[] = [];
+
+        for (const record of records) {
+          let hubspotObjectId: string | undefined;
+          let associationTypeId: number;
+
+          // Convert to 18-char ID for lookup
+          const salesforceId18 = convertTo18CharId(record.salesforceId);
+
+          if (record.objectType === "contact") {
+            hubspotObjectId = contactMappings.get(salesforceId18);
+            associationTypeId = 194;
+          } else if (record.objectType === "company") {
+            hubspotObjectId = companyMappings.get(salesforceId18);
+            associationTypeId = 182;
+          } else if (record.objectType === "deal") {
+            hubspotObjectId = dealMappings.get(salesforceId18);
+            associationTypeId = 206;
+          } else {
+            logger.warn("Unknown object type", {
+              objectType: record.objectType,
+              activityId,
+            });
+            continue;
+          }
+
+          if (!hubspotObjectId) {
+            // Skip this association but continue with other associations for this call
+            // (Object might be deleted in HubSpot)
+            logger.debug("Skipping association - object not found in HubSpot", {
+              salesforceId_15char: record.salesforceId,
+              salesforceId_18char: salesforceId18,
+              objectType: record.objectType,
+              activityId,
+            });
+            continue;
+          }
+
+          // Add association
+          associations.push({
+            to: { id: hubspotObjectId },
+            types: [
+              {
+                associationCategory: "HUBSPOT_DEFINED",
+                associationTypeId: associationTypeId,
+              },
+            ],
+          });
+        }
+
+        // Only create call if it has at least one association
+        if (associations.length > 0) {
+          callsToCreate.push({
+            activityId,
+            properties,
+            associations,
+          });
+        } else {
+          logger.warn("Call has no valid associations, skipping", {
+            activityId,
+          });
+
+          await database.createMigrationError(
+            this.runId,
+            objectType,
+            activityId,
+            "Task",
+            "No valid associations found for call",
+          );
+        }
+      }
+
+      logger.info(`Built ${callsToCreate.length} calls to create in HubSpot`);
+
+      // Validation: Check if we have any calls to create
+      const callsSkipped = recordsToProcess.size - callsToCreate.length;
+
+      if (callsSkipped > 0) {
+        const skipPercentage = (
+          (callsSkipped / recordsToProcess.size) *
+          100
+        ).toFixed(1);
+        logger.warn(
+          `⚠️ ${callsSkipped} out of ${recordsToProcess.size} calls (${skipPercentage}%) were skipped due to missing all associations (likely deleted objects)`,
+        );
+
+        // If more than 20% of calls are missing ALL associations, this is likely a data issue
+        const skipThreshold = 20;
+        if (parseFloat(skipPercentage) > skipThreshold) {
+          const errorMessage = `❌ FATAL ERROR: Too many calls missing ALL associations (${callsSkipped}/${recordsToProcess.size} = ${skipPercentage}% > ${skipThreshold}%). This indicates a major data mismatch. Please investigate.`;
+          logger.error(errorMessage);
+
+          throw new Error(errorMessage);
+        }
+      }
+
+      // Step 7: Batch create calls in HubSpot
+      logger.info("Step 7: Batch creating calls in HubSpot...");
+
+      let successCount = 0;
+      let failedCount = 0;
+
+      // Process in batches of 100
+      const batchSize = 100;
+      for (let i = 0; i < callsToCreate.length; i += batchSize) {
+        if (this.shouldStop) break;
+
+        const batch = callsToCreate.slice(i, i + batchSize);
+
+        try {
+          const inputs = batch.map((call) => ({
+            properties: call.properties,
+            associations: call.associations,
+          }));
+
+          // Use HubSpot batch create API
+          await hubspotLoader.batchCreateCallsWithAssociations(inputs);
+
+          successCount += batch.length;
+
+          // Store ID mappings for successful calls
+          await database.bulkCreateIdMappings(
+            batch.map((call) => ({
+              runId: this.runId!,
+              salesforceId: call.activityId,
+              salesforceType: "Task",
+              hubspotId: "created", // We don't get IDs back easily, but we track it was created
+              hubspotType: "call",
+            })),
+          );
+
+          logger.info(
+            `Successfully created batch of ${batch.length} calls (${successCount}/${callsToCreate.length})`,
+          );
+        } catch (error: any) {
+          logger.error("Failed to create batch of calls", {
+            error: error.message,
+            batchSize: batch.length,
+          });
+
+          failedCount += batch.length;
+
+          // Log errors for each call in the failed batch
+          for (const call of batch) {
+            await database.createMigrationError(
+              this.runId,
+              objectType,
+              call.activityId,
+              "Task",
+              `Failed to create call: ${error.message}`,
+            );
+          }
+        }
+
+        // Update progress
+        await database.updateMigrationProgress(this.runId, objectType, {
+          processed_records: successCount,
+          failed_records: failedCount,
+        });
+
+        // Small delay between batches
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+
+      // Mark as completed
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "completed",
+        completed_at: new Date(),
+      });
+
+      await database.createAuditLog(
+        this.runId,
+        "object_migration_completed",
+        objectType,
+        successCount,
+        {
+          successCount,
+          failedCount,
+        },
+      );
+
+      logger.info(
+        `✅ Completed Call migration from Excel: ${successCount} calls created, ${failedCount} failed`,
+      );
+    } catch (error: any) {
+      logger.error("❌ Failed to migrate calls from Excel", {
+        error: error.message,
+      });
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "failed",
+        completed_at: new Date(),
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * Migrate emails from Excel files to HubSpot
+   */
+  private async migrateEmailsFromExcel(
+    testMode: boolean = false,
+    testModeLimit: number = 5,
+  ): Promise<void> {
+    if (!this.runId) {
+      throw new Error("No active migration run");
+    }
+
+    const objectType: ObjectType = "activities";
+
+    logger.info("📧 Starting Email migration from Excel files");
+
+    try {
+      // Create progress tracking
+      await database.createMigrationProgress(
+        this.runId,
+        objectType,
+        "in_progress",
+      );
+      await database.updateMigrationProgress(this.runId, objectType, {
+        started_at: new Date(),
+      });
+
+      // Step 1: Read all Excel files
+      logger.info("Step 1: Reading Excel files...");
+      const contactsPath =
+        "../data/email-data/Emails - Contacts-Migration List.xlsx";
+      const accountsPath =
+        "../data/email-data/Emails - Accounts- Migration List.xlsx";
+      const opportunitiesPath =
+        "../data/email-data/Emails - Opportunities-Migration List.xlsx";
+
+      const allRecords = excelReader.readAllEmailFiles(
+        contactsPath,
+        accountsPath,
+        opportunitiesPath,
+      );
+
+      logger.info(`Total records read: ${allRecords.length}`);
+
+      // Step 2: Group by Activity ID
+      logger.info("Step 2: Grouping records by Activity ID...");
+      const groupedRecords = excelReader.groupEmailsByActivityId(allRecords);
+
+      const totalUniqueEmails = groupedRecords.size;
+      const emailsToMigrate = testMode
+        ? Math.min(testModeLimit, totalUniqueEmails)
+        : totalUniqueEmails;
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        total_records: emailsToMigrate,
+      });
+
+      // Limit the records to process in test mode
+      let recordsToProcess: Map<string, any[]>;
+      if (testMode) {
+        logger.info(
+          `🧪 TEST MODE: Will process ${emailsToMigrate} of ${totalUniqueEmails} unique emails`,
+        );
+        recordsToProcess = new Map(
+          Array.from(groupedRecords.entries()).slice(0, testModeLimit),
+        );
+      } else {
+        logger.info(`Total unique emails to migrate: ${totalUniqueEmails}`);
+        recordsToProcess = groupedRecords;
+      }
+
+      // Step 3: Collect Salesforce IDs for bulk lookup (only from records we'll process)
+      logger.info("Step 3: Collecting Salesforce IDs for bulk lookup...");
+      const contactIds = new Set<string>();
+      const accountIds = new Set<string>();
+      const opportunityIds = new Set<string>();
+      const ownerNames = new Set<string>();
+
+      for (const records of recordsToProcess.values()) {
+        for (const record of records) {
+          // Convert 15-char Salesforce IDs to 18-char format for HubSpot lookup
+          const salesforceId18 = convertTo18CharId(record.salesforceId);
+
+          if (record.objectType === "contact") {
+            contactIds.add(salesforceId18);
+          } else if (record.objectType === "company") {
+            accountIds.add(salesforceId18);
+          } else if (record.objectType === "deal") {
+            opportunityIds.add(salesforceId18);
+          }
+
+          if (record.owner) {
+            ownerNames.add(record.owner);
+          }
+        }
+      }
+
+      logger.info("Collected Salesforce IDs", {
+        contacts: contactIds.size,
+        accounts: accountIds.size,
+        opportunities: opportunityIds.size,
+        owners: ownerNames.size,
+      });
+
+      // Debug: Log sample IDs (now converted to 18-char format)
+      console.log("\n=== Sample Salesforce IDs (converted to 18-char) ===");
+      console.log("Contact IDs (first 5):", Array.from(contactIds).slice(0, 5));
+      console.log("Account IDs (first 5):", Array.from(accountIds).slice(0, 5));
+      console.log(
+        "Opportunity IDs (first 5):",
+        Array.from(opportunityIds).slice(0, 5),
+      );
+      console.log(
+        "\nNote: 15-char IDs automatically converted to 18-char format for HubSpot lookup",
+      );
+
+      // Step 4: Bulk lookup HubSpot objects
+      // Run sequentially to avoid rate limit issues
+      logger.info("Step 4: Bulk lookup HubSpot objects by Salesforce IDs...");
+
+      const contactMappings =
+        contactIds.size > 0
+          ? await hubspotLoader.bulkFindObjectsBySalesforceIds(
+              "contacts",
+              Array.from(contactIds),
+            )
+          : new Map<string, string>();
+
+      const companyMappings =
+        accountIds.size > 0
+          ? await hubspotLoader.bulkFindObjectsBySalesforceIds(
+              "companies",
+              Array.from(accountIds),
+            )
+          : new Map<string, string>();
+
+      const dealMappings =
+        opportunityIds.size > 0
+          ? await hubspotLoader.bulkFindObjectsBySalesforceIds(
+              "deals",
+              Array.from(opportunityIds),
+            )
+          : new Map<string, string>();
+
+      logger.info("HubSpot object lookup results", {
+        contactsFound: contactMappings.size,
+        companiesFound: companyMappings.size,
+        dealsFound: dealMappings.size,
+      });
+
+      // Check for missing IDs and report them
+      const missingContacts = Array.from(contactIds).filter(
+        (id) => !contactMappings.has(id),
+      );
+      const missingCompanies = Array.from(accountIds).filter(
+        (id) => !companyMappings.has(id),
+      );
+      const missingDeals = Array.from(opportunityIds).filter(
+        (id) => !dealMappings.has(id),
+      );
+
+      if (
+        missingContacts.length > 0 ||
+        missingCompanies.length > 0 ||
+        missingDeals.length > 0
+      ) {
+        console.log("\n❌ === MISSING HUBSPOT OBJECTS ===");
+
+        if (missingContacts.length > 0) {
+          console.log(
+            `\nMissing Contacts (${missingContacts.length}/${contactIds.size}):`,
+          );
+          console.log(missingContacts);
+        }
+
+        if (missingCompanies.length > 0) {
+          console.log(
+            `\nMissing Companies (${missingCompanies.length}/${accountIds.size}):`,
+          );
+          console.log(missingCompanies);
+        }
+
+        if (missingDeals.length > 0) {
+          console.log(
+            `\nMissing Deals (${missingDeals.length}/${opportunityIds.size}):`,
+          );
+          console.log(missingDeals);
+        }
+
+        console.log("\n=================================\n");
+      }
+
+      // Step 5: Initialize owner mapper
+      logger.info("Step 5: Initializing owner mapper...");
+      const connection = salesforceExtractor.getConnection();
+      if (!connection) {
+        throw new Error("Salesforce connection not available");
+      }
+      await ownerMapper.initialize(connection, this.runId);
+
+      // Get Sean Merat's HubSpot owner ID as fallback
+      const seanMeratOwnerId =
+        await ownerMapper.getHubSpotOwnerIdByName("Sean Merat");
+      if (!seanMeratOwnerId) {
+        logger.warn(
+          "Sean Merat not found in owner mappings, will use null for unmapped owners",
+        );
+      } else {
+        logger.info("Using Sean Merat as fallback owner", {
+          ownerId: seanMeratOwnerId,
+        });
+      }
+
+      // Step 6: Build emails with associations
+      logger.info("Step 6: Building emails with associations...");
+
+      const emailsToCreate: Array<{
+        activityId: string;
+        properties: Record<string, any>;
+        associations: any[];
+      }> = [];
+
+      let processedCount = 0;
+      const totalToProcess = recordsToProcess.size;
+
+      for (const [activityId, records] of recordsToProcess) {
+        if (this.shouldStop) break;
+
+        processedCount++;
+
+        // Log progress every 100 emails
+        if (processedCount % 100 === 0 || processedCount === totalToProcess) {
+          logger.info(
+            `Building emails: ${processedCount}/${totalToProcess} (${((processedCount / totalToProcess) * 100).toFixed(1)}%)`,
+          );
+        }
+
+        // Use the first record for email properties
+        const firstRecord = records[0];
+
+        // Build email properties
+        const properties: Record<string, any> = {
+          hs_timestamp: excelReader.parseTimestampForHubSpot(
+            firstRecord.timestamp,
+          ),
+          hs_email_subject: firstRecord.subject || "No Subject",
+          hs_email_text: firstRecord.body || "",
+          hs_email_html: firstRecord.body || "",
+          hs_email_status: firstRecord.status || "SENT",
+          hs_email_direction: firstRecord.direction || "EMAIL",
+        };
+
+        // Map owner
+        let ownerId = null;
+        if (firstRecord.owner) {
+          ownerId = await ownerMapper.getHubSpotOwnerIdByName(
+            firstRecord.owner,
+          );
+          if (!ownerId) {
+            logger.debug("Owner not found, using fallback", {
+              ownerName: firstRecord.owner,
+              activityId,
+            });
+            ownerId = seanMeratOwnerId;
+          }
+        }
+
+        if (ownerId) {
+          properties.hubspot_owner_id = ownerId;
+        }
+
+        // Build associations array
+        const associations: any[] = [];
+
+        for (const record of records) {
+          let hubspotObjectId: string | undefined;
+          let associationTypeId: number;
+
+          // Convert to 18-char ID for lookup
+          const salesforceId18 = convertTo18CharId(record.salesforceId);
+
+          if (record.objectType === "contact") {
+            hubspotObjectId = contactMappings.get(salesforceId18);
+            associationTypeId = 198; // Email to Contact
+          } else if (record.objectType === "company") {
+            hubspotObjectId = companyMappings.get(salesforceId18);
+            associationTypeId = 186; // Email to Company
+          } else if (record.objectType === "deal") {
+            hubspotObjectId = dealMappings.get(salesforceId18);
+            associationTypeId = 210; // Email to Deal
+          } else {
+            logger.warn("Unknown object type", {
+              objectType: record.objectType,
+              activityId,
+            });
+            continue;
+          }
+
+          if (!hubspotObjectId) {
+            // Skip this association but continue with other associations
+            logger.debug("Skipping association - object not found in HubSpot", {
+              salesforceId_15char: record.salesforceId,
+              salesforceId_18char: salesforceId18,
+              objectType: record.objectType,
+              activityId,
+            });
+            continue;
+          }
+
+          // Add association
+          associations.push({
+            to: { id: hubspotObjectId },
+            types: [
+              {
+                associationCategory: "HUBSPOT_DEFINED",
+                associationTypeId: associationTypeId,
+              },
+            ],
+          });
+        }
+
+        // Only create email if it has at least one association
+        if (associations.length > 0) {
+          emailsToCreate.push({
+            activityId,
+            properties,
+            associations,
+          });
+        } else {
+          logger.warn("Email has no valid associations, skipping", {
+            activityId,
+          });
+
+          await database.createMigrationError(
+            this.runId,
+            objectType,
+            activityId,
+            "Email",
+            "No valid associations found for email",
+          );
+        }
+      }
+
+      logger.info(`Built ${emailsToCreate.length} emails to create in HubSpot`);
+
+      // Validation: Check if we have any emails to create
+      const emailsSkipped = recordsToProcess.size - emailsToCreate.length;
+
+      if (emailsSkipped > 0) {
+        const skipPercentage = (
+          (emailsSkipped / recordsToProcess.size) *
+          100
+        ).toFixed(1);
+        logger.warn(
+          `⚠️ ${emailsSkipped} out of ${recordsToProcess.size} emails (${skipPercentage}%) were skipped due to missing all associations (likely deleted objects)`,
+        );
+
+        // If more than 20% of emails are missing ALL associations, this is likely a data issue
+        const skipThreshold = 20;
+        if (parseFloat(skipPercentage) > skipThreshold) {
+          const errorMessage = `❌ FATAL ERROR: Too many emails missing ALL associations (${emailsSkipped}/${recordsToProcess.size} = ${skipPercentage}% > ${skipThreshold}%). This indicates a major data mismatch. Please investigate.`;
+          logger.error(errorMessage);
+
+          throw new Error(errorMessage);
+        }
+      }
+
+      // Step 7: Batch create emails in HubSpot
+      logger.info("Step 7: Batch creating emails in HubSpot...");
+
+      let successCount = 0;
+      let failedCount = 0;
+
+      // Process in batches of 100
+      const batchSize = 100;
+      for (let i = 0; i < emailsToCreate.length; i += batchSize) {
+        if (this.shouldStop) break;
+
+        const batch = emailsToCreate.slice(i, i + batchSize);
+
+        try {
+          const inputs = batch.map((email) => ({
+            properties: email.properties,
+            associations: email.associations,
+          }));
+
+          await hubspotLoader.batchCreateEmailsWithAssociations(inputs);
+
+          successCount += batch.length;
+          logger.info(
+            `Successfully created batch of ${batch.length} emails (${successCount}/${emailsToCreate.length})`,
+          );
+
+          await database.updateMigrationProgress(this.runId, objectType, {
+            processed_records: successCount,
+          });
+        } catch (error: any) {
+          logger.error("Failed to create batch of emails", {
+            error: error.message,
+            batchSize: batch.length,
+          });
+          failedCount += batch.length;
+
+          // Continue with next batch instead of stopping
+        }
+      }
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "completed",
+        completed_at: new Date(),
+        processed_records: successCount,
+      });
+
+      await database.createAuditLog(
+        this.runId,
+        "object_migration_completed",
+        objectType,
+        successCount,
+      );
+
+      logger.info(
+        `✅ Completed Email migration from Excel: ${successCount} emails created, ${failedCount} failed`,
+      );
+    } catch (error: any) {
+      logger.error("❌ Failed to migrate emails from Excel", {
+        error: error.message,
+      });
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "failed",
+        completed_at: new Date(),
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * Migrate Meetings from Excel files to HubSpot
+   */
+  private async migrateMeetingsFromExcel(
+    testMode: boolean = false,
+    testModeLimit: number = 5,
+  ): Promise<void> {
+    const objectType: ObjectType = "meeting_migration_from_excel";
+
+    try {
+      logger.info("📅 Starting Meeting migration from Excel files");
+
+      // Step 1: Read Excel files
+      logger.info("Step 1: Reading Excel files...");
+
+      const contactsPath = path.join(
+        __dirname,
+        "../../../data/meeting-data/Meeting - Contacts-Migration List.xlsx",
+      );
+      const accountsPath = path.join(
+        __dirname,
+        "../../../data/meeting-data/Meetings Accounts- Migration List.xlsx",
+      );
+      const opportunitiesPath = path.join(
+        __dirname,
+        "../../../data/meeting-data/Meetings - Opportunities-Migration List.xlsx",
+      );
+
+      const allRecords = excelReader.readAllMeetingFiles(
+        contactsPath,
+        accountsPath,
+        opportunitiesPath,
+      );
+
+      logger.info("Total records read:", { total: allRecords.length });
+
+      // Step 2: Group by Activity ID
+      logger.info("Step 2: Grouping records by Activity ID...");
+      const groupedRecords = excelReader.groupMeetingsByActivityId(allRecords);
+
+      const totalUniqueMeetings = groupedRecords.size;
+
+      // Determine how many meetings to migrate
+      let recordsToProcess: Map<string, typeof allRecords>;
+      const meetingsToMigrate = testMode
+        ? Math.min(testModeLimit, totalUniqueMeetings)
+        : totalUniqueMeetings;
+
+      if (testMode) {
+        logger.info(
+          `🧪 TEST MODE: Will process ${meetingsToMigrate} of ${totalUniqueMeetings} unique meetings`,
+        );
+        recordsToProcess = new Map(
+          Array.from(groupedRecords.entries()).slice(0, testModeLimit),
+        );
+      } else {
+        logger.info(`Total unique meetings to migrate: ${totalUniqueMeetings}`);
+        recordsToProcess = groupedRecords;
+      }
+
+      // Step 3: Collect Salesforce IDs for bulk lookup (only from records we'll process)
+      logger.info("Step 3: Collecting Salesforce IDs for bulk lookup...");
+      const contactIds = new Set<string>();
+      const accountIds = new Set<string>();
+      const opportunityIds = new Set<string>();
+      const ownerNames = new Set<string>();
+
+      for (const records of recordsToProcess.values()) {
+        for (const record of records) {
+          // Convert 15-char Salesforce IDs to 18-char format for HubSpot lookup
+          const salesforceId18 = convertTo18CharId(record.salesforceId);
+
+          if (record.objectType === "contact") {
+            contactIds.add(salesforceId18);
+          } else if (record.objectType === "company") {
+            accountIds.add(salesforceId18);
+          } else if (record.objectType === "deal") {
+            opportunityIds.add(salesforceId18);
+          }
+
+          if (record.owner) {
+            ownerNames.add(record.owner);
+          }
+        }
+      }
+
+      logger.info("Collected Salesforce IDs", {
+        contacts: contactIds.size,
+        accounts: accountIds.size,
+        opportunities: opportunityIds.size,
+        owners: ownerNames.size,
+      });
+
+      // Debug: Log sample IDs (now converted to 18-char format)
+      console.log("\n=== Sample Salesforce IDs (converted to 18-char) ===");
+      console.log("Contact IDs (first 5):", Array.from(contactIds).slice(0, 5));
+      console.log("Account IDs (first 5):", Array.from(accountIds).slice(0, 5));
+      console.log(
+        "Opportunity IDs (first 5):",
+        Array.from(opportunityIds).slice(0, 5),
+      );
+      console.log(
+        "\nNote: 15-char IDs automatically converted to 18-char format for HubSpot lookup",
+      );
+
+      // Step 4: Bulk lookup HubSpot objects
+      // Run sequentially to avoid rate limit issues
+      logger.info("Step 4: Bulk lookup HubSpot objects by Salesforce IDs...");
+
+      const contactMappings =
+        contactIds.size > 0
+          ? await hubspotLoader.bulkFindObjectsBySalesforceIds(
+              "contacts",
+              Array.from(contactIds),
+            )
+          : new Map<string, string>();
+
+      const companyMappings =
+        accountIds.size > 0
+          ? await hubspotLoader.bulkFindObjectsBySalesforceIds(
+              "companies",
+              Array.from(accountIds),
+            )
+          : new Map<string, string>();
+
+      const dealMappings =
+        opportunityIds.size > 0
+          ? await hubspotLoader.bulkFindObjectsBySalesforceIds(
+              "deals",
+              Array.from(opportunityIds),
+            )
+          : new Map<string, string>();
+
+      logger.info("HubSpot object lookup results", {
+        contactsFound: contactMappings.size,
+        companiesFound: companyMappings.size,
+        dealsFound: dealMappings.size,
+      });
+
+      // Check for missing IDs and report them
+      const missingContacts = Array.from(contactIds).filter(
+        (id) => !contactMappings.has(id),
+      );
+      const missingCompanies = Array.from(accountIds).filter(
+        (id) => !companyMappings.has(id),
+      );
+      const missingDeals = Array.from(opportunityIds).filter(
+        (id) => !dealMappings.has(id),
+      );
+
+      if (
+        missingContacts.length > 0 ||
+        missingCompanies.length > 0 ||
+        missingDeals.length > 0
+      ) {
+        console.log("\n❌ === MISSING HUBSPOT OBJECTS ===");
+
+        if (missingContacts.length > 0) {
+          console.log(
+            `\nMissing Contacts (${missingContacts.length}/${contactIds.size}):`,
+          );
+          console.log(missingContacts);
+        }
+
+        if (missingCompanies.length > 0) {
+          console.log(
+            `\nMissing Companies (${missingCompanies.length}/${accountIds.size}):`,
+          );
+          console.log(missingCompanies);
+        }
+
+        if (missingDeals.length > 0) {
+          console.log(
+            `\nMissing Deals (${missingDeals.length}/${opportunityIds.size}):`,
+          );
+          console.log(missingDeals);
+        }
+
+        console.log("\n=================================\n");
+      }
+
+      // Step 5: Initialize owner mapper
+      logger.info("Step 5: Initializing owner mapper...");
+      const connection = salesforceExtractor.getConnection();
+      if (!connection) {
+        throw new Error("Salesforce connection not available");
+      }
+      await ownerMapper.initialize(connection, this.runId);
+
+      // Get Sean Merat's HubSpot owner ID as fallback
+      const seanMeratOwnerId =
+        await ownerMapper.getHubSpotOwnerIdByName("Sean Merat");
+      if (!seanMeratOwnerId) {
+        logger.warn(
+          "Sean Merat not found in owner mappings, will use null for unmapped owners",
+        );
+      } else {
+        logger.info("Using Sean Merat as fallback owner", {
+          ownerId: seanMeratOwnerId,
+        });
+      }
+
+      // Step 6: Build meeting objects
+      logger.info("Step 6: Building meetings with associations...");
+
+      const meetingsToCreate: Array<{
+        properties: Record<string, any>;
+        associations: any[];
+      }> = [];
+
+      let skippedCount = 0;
+      let processedCount = 0;
+      const totalToProcess = recordsToProcess.size;
+
+      for (const [activityId, records] of recordsToProcess) {
+        processedCount++;
+
+        // Progress logging every 100 meetings
+        if (processedCount % 100 === 0 || processedCount === totalToProcess) {
+          logger.info(
+            `Building meetings: ${processedCount}/${totalToProcess} (${((processedCount / totalToProcess) * 100).toFixed(1)}%)`,
+          );
+        }
+
+        // Use first record for meeting properties
+        const firstRecord = records[0];
+
+        // Build meeting properties
+        const timestamp = excelReader.parseMeetingTimestampForHubSpot(
+          firstRecord.timestamp,
+        );
+
+        const properties: Record<string, any> = {
+          hs_timestamp: timestamp,
+          hs_meeting_start_time: timestamp,
+          hs_meeting_end_time: timestamp,
+          hs_meeting_title: firstRecord.title || "Meeting",
+          hs_meeting_body: firstRecord.body || "",
+          hs_meeting_outcome: firstRecord.outcome || "COMPLETED",
+        };
+
+        // Add activity type if available
+        if (firstRecord.activityType) {
+          properties.hs_activity_type = firstRecord.activityType;
+        }
+
+        // Map owner
+        let hubspotOwnerId = seanMeratOwnerId || null;
+        if (firstRecord.owner) {
+          const mappedOwner = await ownerMapper.getHubSpotOwnerIdByName(
+            firstRecord.owner,
+          );
+          if (mappedOwner) {
+            hubspotOwnerId = mappedOwner;
+          }
+        }
+
+        if (hubspotOwnerId) {
+          properties.hubspot_owner_id = hubspotOwnerId;
+        }
+
+        // Build associations array
+        const associations: any[] = [];
+
+        let hasAtLeastOneAssociation = false;
+
+        for (const record of records) {
+          const salesforceId18 = convertTo18CharId(record.salesforceId);
+          let hubspotId: string | undefined;
+          let associationTypeId: number;
+
+          if (record.objectType === "contact") {
+            hubspotId = contactMappings.get(salesforceId18);
+            associationTypeId = 200; // Meeting to Contact
+          } else if (record.objectType === "company") {
+            hubspotId = companyMappings.get(salesforceId18);
+            associationTypeId = 188; // Meeting to Company
+          } else if (record.objectType === "deal") {
+            hubspotId = dealMappings.get(salesforceId18);
+            associationTypeId = 212; // Meeting to Deal
+          }
+
+          if (!hubspotId) {
+            logger.debug(`Skipping association - HubSpot ID not found`, {
+              activityId,
+              salesforceId: salesforceId18,
+              objectType: record.objectType,
+            });
+            continue;
+          }
+
+          hasAtLeastOneAssociation = true;
+
+          associations.push({
+            to: { id: hubspotId },
+            types: [
+              {
+                associationCategory: "HUBSPOT_DEFINED",
+                associationTypeId: associationTypeId,
+              },
+            ],
+          });
+        }
+
+        // Only create meeting if it has at least one valid association
+        if (!hasAtLeastOneAssociation) {
+          logger.debug(
+            `Skipping meeting - no valid associations found (all objects missing in HubSpot)`,
+            { activityId },
+          );
+          skippedCount++;
+          continue;
+        }
+
+        meetingsToCreate.push({
+          properties,
+          associations,
+        });
+      }
+
+      logger.info(
+        `Built ${meetingsToCreate.length} meetings to create in HubSpot`,
+      );
+
+      // Validate: Make sure we're not skipping too many meetings
+      const skipPercentage = ((skippedCount / totalToProcess) * 100).toFixed(1);
+      const skipThreshold = 20; // Allow up to 20% skip rate
+
+      if (parseFloat(skipPercentage) > skipThreshold) {
+        throw new Error(
+          `Too many meetings missing ALL associations (${skippedCount}/${totalToProcess} = ${skipPercentage}%). This might indicate a data quality issue.`,
+        );
+      }
+
+      if (skippedCount > 0) {
+        logger.info(
+          `Skipped ${skippedCount} meetings with no valid associations (${skipPercentage}%)`,
+        );
+      }
+
+      // Step 7: Batch create meetings in HubSpot
+      logger.info("Step 7: Batch creating meetings in HubSpot...");
+
+      let successCount = 0;
+      let failedCount = 0;
+      const batchSize = 100;
+
+      for (let i = 0; i < meetingsToCreate.length; i += batchSize) {
+        if (this.shouldStop) {
+          logger.info("Migration stopped by user");
+          break;
+        }
+
+        const batch = meetingsToCreate.slice(i, i + batchSize);
+
+        try {
+          await hubspotLoader.batchCreateMeetingsWithAssociations(batch);
+          successCount += batch.length;
+          logger.info(
+            `Successfully created batch of ${batch.length} meetings (${successCount}/${meetingsToCreate.length})`,
+          );
+        } catch (error: any) {
+          logger.error("Failed to create batch of meetings", {
+            error: error.message,
+            batchStart: i,
+            batchSize: batch.length,
+          });
+          failedCount += batch.length;
+        }
+      }
+
+      logger.info(
+        `✅ Completed Meeting migration from Excel: ${successCount} meetings created, ${failedCount} failed`,
+      );
+    } catch (error: any) {
+      console.error("=== MEETING MIGRATION ERROR ===");
+      console.error("Error:", error);
+      console.error("Stack:", error.stack);
+      console.error("===============================");
+
+      logger.error("❌ Failed to migrate meetings from Excel", {
+        error: error.message,
+      });
+
+      await database.updateMigrationProgress(this.runId, objectType, {
+        status: "failed",
+        completed_at: new Date(),
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * Migrate tasks from Excel files to HubSpot
+   */
+  private async migrateTasksFromExcel(
+    testMode: boolean = false,
+    testModeLimit: number = 5,
+  ): Promise<void> {
+    try {
+      logger.info("📋 Starting Task migration from Excel files");
+
+      // Step 1: Read Excel files
+      logger.info("Step 1: Reading Excel files...");
+
+      const contactsPath = path.join(
+        __dirname,
+        "../../../data/task-data/Tasks - Contacts-Migration List.xlsx",
+      );
+      const accountsPath = path.join(
+        __dirname,
+        "../../../data/task-data/Tasks - Accounts- Migration List.xlsx",
+      );
+      const opportunitiesPath = path.join(
+        __dirname,
+        "../../../data/task-data/Tasks - Opportunities-Migration List.xlsx",
+      );
+
+      const allRecords = excelReader.readAllTaskFiles(
+        contactsPath,
+        accountsPath,
+        opportunitiesPath,
+      );
+
+      logger.info("Total records read:", { total: allRecords.length });
+
+      // Step 2: Group by Activity ID
+      logger.info("Step 2: Grouping records by Activity ID...");
+      const groupedRecords = excelReader.groupTasksByActivityId(allRecords);
+
+      const totalUniqueTasks = groupedRecords.size;
+
+      // Determine how many tasks to migrate
+      let recordsToProcess: Map<string, typeof allRecords>;
+      const tasksToMigrate = testMode
+        ? Math.min(testModeLimit, totalUniqueTasks)
+        : totalUniqueTasks;
+
+      if (testMode) {
+        logger.info(
+          `🧪 TEST MODE: Will process ${tasksToMigrate} of ${totalUniqueTasks} unique tasks`,
+        );
+        recordsToProcess = new Map(
+          Array.from(groupedRecords.entries()).slice(0, testModeLimit),
+        );
+      } else {
+        logger.info(`Total unique tasks to migrate: ${totalUniqueTasks}`);
+        recordsToProcess = groupedRecords;
+      }
+
+      // Step 3: Collect Salesforce IDs for bulk lookup (only from records we'll process)
+      logger.info("Step 3: Collecting Salesforce IDs for bulk lookup...");
+      const contactIds = new Set<string>();
+      const accountIds = new Set<string>();
+      const opportunityIds = new Set<string>();
+      const ownerNames = new Set<string>();
+
+      for (const records of recordsToProcess.values()) {
+        for (const record of records) {
+          // Convert 15-char Salesforce IDs to 18-char format for HubSpot lookup
+          const salesforceId18 = convertTo18CharId(record.salesforceId);
+
+          if (record.objectType === "contact") {
+            contactIds.add(salesforceId18);
+          } else if (record.objectType === "company") {
+            accountIds.add(salesforceId18);
+          } else if (record.objectType === "deal") {
+            opportunityIds.add(salesforceId18);
+          }
+
+          if (record.owner) {
+            ownerNames.add(record.owner);
+          }
+        }
+      }
+
+      logger.info("Collected Salesforce IDs", {
+        contacts: contactIds.size,
+        accounts: accountIds.size,
+        opportunities: opportunityIds.size,
+        owners: ownerNames.size,
+      });
+
+      // Debug: Log sample IDs (now converted to 18-char format)
+      console.log("\n=== Sample Salesforce IDs (converted to 18-char) ===");
+      console.log("Contact IDs (first 5):", Array.from(contactIds).slice(0, 5));
+      console.log("Account IDs (first 5):", Array.from(accountIds).slice(0, 5));
+      console.log(
+        "Opportunity IDs (first 5):",
+        Array.from(opportunityIds).slice(0, 5),
+      );
+      console.log(
+        "\nNote: 15-char IDs automatically converted to 18-char format for HubSpot lookup",
+      );
+
+      // Step 4: Bulk lookup HubSpot objects
+      // Run sequentially to avoid rate limit issues
+      logger.info("Step 4: Bulk lookup HubSpot objects by Salesforce IDs...");
+
+      const contactMappings =
+        contactIds.size > 0
+          ? await hubspotLoader.bulkFindObjectsBySalesforceIds(
+              "contacts",
+              Array.from(contactIds),
+            )
+          : new Map<string, string>();
+
+      const companyMappings =
+        accountIds.size > 0
+          ? await hubspotLoader.bulkFindObjectsBySalesforceIds(
+              "companies",
+              Array.from(accountIds),
+            )
+          : new Map<string, string>();
+
+      const dealMappings =
+        opportunityIds.size > 0
+          ? await hubspotLoader.bulkFindObjectsBySalesforceIds(
+              "deals",
+              Array.from(opportunityIds),
+            )
+          : new Map<string, string>();
+
+      logger.info("HubSpot object lookup results", {
+        contactsFound: contactMappings.size,
+        companiesFound: companyMappings.size,
+        dealsFound: dealMappings.size,
+      });
+
+      // Check for missing IDs and report them
+      const missingContacts = Array.from(contactIds).filter(
+        (id) => !contactMappings.has(id),
+      );
+      const missingCompanies = Array.from(accountIds).filter(
+        (id) => !companyMappings.has(id),
+      );
+      const missingDeals = Array.from(opportunityIds).filter(
+        (id) => !dealMappings.has(id),
+      );
+
+      if (
+        missingContacts.length > 0 ||
+        missingCompanies.length > 0 ||
+        missingDeals.length > 0
+      ) {
+        console.log("\n❌ === MISSING HUBSPOT OBJECTS ===");
+
+        if (missingContacts.length > 0) {
+          console.log(
+            `\nMissing Contacts (${missingContacts.length}/${contactIds.size}):`,
+          );
+          console.log(missingContacts);
+        }
+
+        if (missingCompanies.length > 0) {
+          console.log(
+            `\nMissing Companies (${missingCompanies.length}/${accountIds.size}):`,
+          );
+          console.log(missingCompanies);
+        }
+
+        if (missingDeals.length > 0) {
+          console.log(
+            `\nMissing Deals (${missingDeals.length}/${opportunityIds.size}):`,
+          );
+          console.log(missingDeals);
+        }
+
+        console.log("\n=================================\n");
+      }
+
+      // Step 5: Initialize owner mapper
+      logger.info("Step 5: Initializing owner mapper...");
+      const connection = salesforceExtractor.getConnection();
+      if (!connection) {
+        throw new Error("Salesforce connection not available");
+      }
+      await ownerMapper.initialize(connection, this.runId);
+
+      // Get Sean Merat's HubSpot owner ID as fallback
+      const seanMeratOwnerId =
+        await ownerMapper.getHubSpotOwnerIdByName("Sean Merat");
+      if (!seanMeratOwnerId) {
+        logger.warn(
+          "Sean Merat not found in owner mappings, will use null for unmapped owners",
+        );
+      } else {
+        logger.info("Using Sean Merat as fallback owner", {
+          ownerId: seanMeratOwnerId,
+        });
+      }
+
+      // Step 6: Build task objects
+      logger.info("Step 6: Building tasks with associations...");
+
+      const tasksToCreate: Array<{
+        properties: Record<string, any>;
+        associations: any[];
+      }> = [];
+
+      let skippedCount = 0;
+      let processedCount = 0;
+      const totalToProcess = recordsToProcess.size;
+
+      for (const [activityId, records] of recordsToProcess) {
+        processedCount++;
+
+        // Progress logging every 50 tasks
+        if (processedCount % 50 === 0 || processedCount === totalToProcess) {
+          logger.info(
+            `Building tasks: ${processedCount}/${totalToProcess} (${((processedCount / totalToProcess) * 100).toFixed(1)}%)`,
+          );
+        }
+
+        // Use first record for task properties
+        const firstRecord = records[0];
+
+        // Build task properties
+        const timestamp = excelReader.parseMeetingTimestampForHubSpot(
+          firstRecord.timestamp,
+        );
+
+        const properties: Record<string, any> = {
+          hs_timestamp: timestamp, // This is the due date
+          hs_task_subject: firstRecord.subject || "Task",
+          hs_task_status: firstRecord.status || "COMPLETED",
+          // Note: hs_task_completion_date is read-only and set automatically by HubSpot when status = COMPLETED
+        };
+
+        // Map owner
+        let hubspotOwnerId = seanMeratOwnerId || null;
+        if (firstRecord.owner) {
+          const mappedOwner = await ownerMapper.getHubSpotOwnerIdByName(
+            firstRecord.owner,
+          );
+          if (mappedOwner) {
+            hubspotOwnerId = mappedOwner;
+          }
+        }
+
+        if (hubspotOwnerId) {
+          properties.hubspot_owner_id = hubspotOwnerId;
+        }
+
+        // Build associations array
+        const associations: any[] = [];
+
+        let hasAtLeastOneAssociation = false;
+
+        for (const record of records) {
+          const salesforceId18 = convertTo18CharId(record.salesforceId);
+          let hubspotId: string | undefined;
+          let associationTypeId: number | undefined;
+
+          if (record.objectType === "contact") {
+            hubspotId = contactMappings.get(salesforceId18);
+            associationTypeId = 204; // Task to Contact
+          } else if (record.objectType === "company") {
+            hubspotId = companyMappings.get(salesforceId18);
+            associationTypeId = 192; // Task to Company
+          } else if (record.objectType === "deal") {
+            hubspotId = dealMappings.get(salesforceId18);
+            associationTypeId = 216; // Task to Deal
+          } else {
+            logger.warn("Unknown object type", {
+              objectType: record.objectType,
+              activityId,
+            });
+            continue;
+          }
+
+          if (!hubspotId) {
+            logger.debug(`Skipping association - HubSpot ID not found`, {
+              activityId,
+              salesforceId: salesforceId18,
+              objectType: record.objectType,
+            });
+            continue;
+          }
+
+          hasAtLeastOneAssociation = true;
+
+          associations.push({
+            to: { id: hubspotId },
+            types: [
+              {
+                associationCategory: "HUBSPOT_DEFINED",
+                associationTypeId: associationTypeId,
+              },
+            ],
+          });
+        }
+
+        // Only create task if it has at least one valid association
+        if (!hasAtLeastOneAssociation) {
+          logger.debug(
+            `Skipping task - no valid associations found (all objects missing in HubSpot)`,
+            { activityId },
+          );
+          skippedCount++;
+          continue;
+        }
+
+        tasksToCreate.push({
+          properties,
+          associations,
+        });
+      }
+
+      logger.info(`Built ${tasksToCreate.length} tasks to create in HubSpot`);
+
+      // Validate: Make sure we're not skipping too many tasks
+      const skipPercentage = ((skippedCount / totalToProcess) * 100).toFixed(1);
+      const skipThreshold = 20; // Allow up to 20% skip rate
+
+      if (parseFloat(skipPercentage) > skipThreshold) {
+        throw new Error(
+          `Too many tasks missing ALL associations (${skippedCount}/${totalToProcess} = ${skipPercentage}%). This might indicate a data quality issue.`,
+        );
+      }
+
+      if (skippedCount > 0) {
+        logger.info(
+          `Skipped ${skippedCount} tasks with no valid associations (${skipPercentage}%)`,
+        );
+      }
+
+      // Step 7: Batch create tasks in HubSpot
+      logger.info("Step 7: Batch creating tasks in HubSpot...");
+
+      let successCount = 0;
+      let failedCount = 0;
+      const batchSize = 100;
+
+      for (let i = 0; i < tasksToCreate.length; i += batchSize) {
+        if (this.shouldStop) {
+          logger.info("Migration stopped by user");
+          break;
+        }
+
+        const batch = tasksToCreate.slice(i, i + batchSize);
+
+        try {
+          await hubspotLoader.batchCreateTasksWithAssociations(batch);
+          successCount += batch.length;
+          logger.info(
+            `Successfully created batch of ${batch.length} tasks (${successCount}/${tasksToCreate.length})`,
+          );
+        } catch (error: any) {
+          logger.error("Failed to create batch of tasks", {
+            error: error.message,
+            batchStart: i,
+            batchSize: batch.length,
+          });
+          failedCount += batch.length;
+        }
+      }
+
+      logger.info(
+        `✅ Completed Task migration from Excel: ${successCount} tasks created, ${failedCount} failed`,
+      );
+    } catch (error: any) {
+      console.error("=== TASK MIGRATION ERROR ===");
+      console.error("Error:", error);
+      console.error("Stack:", error.stack);
+      console.error("============================");
+
+      logger.error("❌ Failed to migrate tasks from Excel", {
+        error: error.message,
       });
 
       throw error;

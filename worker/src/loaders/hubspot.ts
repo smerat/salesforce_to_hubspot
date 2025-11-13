@@ -463,6 +463,196 @@ class HubSpotLoader {
   }
 
   /**
+   * Batch create calls with associations in HubSpot
+   */
+  async batchCreateCallsWithAssociations(
+    inputs: Array<{
+      properties: Record<string, any>;
+      associations: any[];
+    }>,
+  ): Promise<void> {
+    if (inputs.length === 0) {
+      return;
+    }
+
+    await this.rateLimiter.waitForToken();
+
+    try {
+      const result = await retry(
+        async () => {
+          return await this.client.crm.objects.calls.batchApi.create({
+            inputs,
+          });
+        },
+        {
+          maxRetries: config.migration.maxRetries,
+          delayMs: 1000,
+        },
+      );
+
+      logger.info(`Batch created ${result.results.length} calls in HubSpot`);
+    } catch (error: any) {
+      console.error("=== BATCH CREATE CALLS ERROR ===");
+      console.error("Message:", error.message);
+      console.error("Status:", error.code);
+      console.error("Body:", JSON.stringify(error.body, null, 2));
+      console.error("Input count:", inputs.length);
+      console.error("Full Error:", error);
+      console.error("================================");
+
+      logger.error("Batch create calls failed", {
+        error: error.message,
+        body: error.body,
+        statusCode: error.code,
+        inputCount: inputs.length,
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * Batch create emails with associations in HubSpot
+   */
+  async batchCreateEmailsWithAssociations(
+    inputs: Array<{
+      properties: Record<string, any>;
+      associations: any[];
+    }>,
+  ): Promise<void> {
+    if (inputs.length === 0) {
+      return;
+    }
+
+    await this.rateLimiter.waitForToken();
+
+    try {
+      const result = await retry(
+        async () => {
+          return await this.client.crm.objects.emails.batchApi.create({
+            inputs,
+          });
+        },
+        {
+          maxRetries: config.migration.maxRetries,
+          delayMs: 1000,
+        },
+      );
+
+      logger.info(`Batch created ${result.results.length} emails in HubSpot`);
+    } catch (error: any) {
+      console.error("=== BATCH CREATE EMAILS ERROR ===");
+      console.error("Message:", error.message);
+      console.error("Status:", error.code);
+      console.error("Body:", JSON.stringify(error.body, null, 2));
+      console.error("====================================");
+
+      logger.error("Batch create emails failed", {
+        error: error.message,
+        body: error.body,
+        statusCode: error.code,
+        batchSize: inputs.length,
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * Batch create meetings with associations in HubSpot
+   */
+  async batchCreateMeetingsWithAssociations(
+    inputs: Array<{
+      properties: Record<string, any>;
+      associations: any[];
+    }>,
+  ): Promise<void> {
+    if (inputs.length === 0) {
+      return;
+    }
+
+    await this.rateLimiter.waitForToken();
+
+    try {
+      const result = await retry(
+        async () => {
+          return await this.client.crm.objects.meetings.batchApi.create({
+            inputs,
+          });
+        },
+        {
+          maxRetries: config.migration.maxRetries,
+          delayMs: 1000,
+        },
+      );
+
+      logger.info(`Batch created ${result.results.length} meetings in HubSpot`);
+    } catch (error: any) {
+      console.error("=== BATCH CREATE MEETINGS ERROR ===");
+      console.error("Message:", error.message);
+      console.error("Status:", error.code);
+      console.error("Body:", JSON.stringify(error.body, null, 2));
+      console.error("====================================");
+
+      logger.error("Batch create meetings failed", {
+        error: error.message,
+        body: error.body,
+        statusCode: error.code,
+        batchSize: inputs.length,
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * Batch create tasks with associations
+   */
+  async batchCreateTasksWithAssociations(
+    inputs: Array<{
+      properties: Record<string, any>;
+      associations: any[];
+    }>,
+  ): Promise<void> {
+    if (inputs.length === 0) {
+      return;
+    }
+
+    await this.rateLimiter.waitForToken();
+
+    try {
+      const result = await retry(
+        async () => {
+          return await this.client.crm.objects.tasks.batchApi.create({
+            inputs,
+          });
+        },
+        {
+          maxRetries: config.migration.maxRetries,
+          delayMs: 1000,
+        },
+      );
+
+      logger.info(`Batch created ${result.results.length} tasks in HubSpot`);
+    } catch (error: any) {
+      console.error("=== BATCH CREATE TASKS ERROR ===");
+      console.error("Message:", error.message);
+      console.error("Status:", error.code);
+      console.error("Body:", JSON.stringify(error.body, null, 2));
+      console.error("====================================");
+
+      logger.error("Batch create tasks failed", {
+        error: error.message,
+        body: error.body,
+        statusCode: error.code,
+        batchSize: inputs.length,
+      });
+
+      throw error;
+    }
+  }
+
+  /**
    * Find HubSpot object by Salesforce ID property
    */
   async findObjectBySalesforceId(
@@ -514,6 +704,7 @@ class HubSpotLoader {
 
   /**
    * Bulk find HubSpot objects by Salesforce IDs
+   * Chunks requests into batches of 100 (HubSpot's IN filter limit)
    */
   async bulkFindObjectsBySalesforceIds(
     objectType: "contacts" | "companies" | "deals",
@@ -522,8 +713,6 @@ class HubSpotLoader {
     if (salesforceIds.length === 0) {
       return new Map();
     }
-
-    await this.rateLimiter.waitForToken();
 
     const propertyMap = {
       contacts: "salesforcecontactid",
@@ -534,55 +723,98 @@ class HubSpotLoader {
     const propertyName = propertyMap[objectType];
     const results = new Map<string, string>();
 
-    try {
-      // HubSpot search API can handle IN operator with multiple values
-      const searchResult = await this.client.crm[objectType].searchApi.doSearch(
-        {
+    // HubSpot's IN filter only allows 100 values max, so we need to chunk
+    const batchSize = 100;
+    const batches = this.chunkArray(salesforceIds, batchSize);
+
+    logger.info(
+      `Searching for ${salesforceIds.length} ${objectType} in ${batches.length} batches`,
+    );
+
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      await this.rateLimiter.waitForToken();
+
+      // Log first batch for debugging
+      if (i === 0) {
+        console.log(`\n=== First batch search for ${objectType} ===`);
+        console.log(`Property: ${propertyName}`);
+        console.log(`Batch size: ${batch.length}`);
+        console.log(`Sample IDs (first 5):`, batch.slice(0, 5));
+        console.log(
+          `Search query:`,
+          JSON.stringify(
+            {
+              filterGroups: [
+                {
+                  filters: [
+                    {
+                      propertyName,
+                      operator: "IN",
+                      values: batch.slice(0, 5),
+                    },
+                  ],
+                },
+              ],
+              properties: [propertyName],
+              limit: 100,
+            },
+            null,
+            2,
+          ),
+        );
+      }
+
+      try {
+        const searchResult = await this.client.crm[
+          objectType
+        ].searchApi.doSearch({
           filterGroups: [
             {
               filters: [
                 {
                   propertyName,
                   operator: "IN",
-                  values: salesforceIds,
+                  values: batch,
                 },
               ],
             },
           ],
           properties: [propertyName],
           limit: 100,
-        },
-      );
+        });
 
-      for (const result of searchResult.results) {
-        const sfId = (result.properties as any)[propertyName];
-        if (sfId) {
-          results.set(sfId, result.id);
+        for (const result of searchResult.results) {
+          const sfId = (result.properties as any)[propertyName];
+          if (sfId) {
+            results.set(sfId, result.id);
+          }
         }
+
+        logger.debug(
+          `Batch ${i + 1}/${batches.length}: Found ${searchResult.results.length} ${objectType}`,
+        );
+      } catch (error: any) {
+        logger.error(
+          `Failed to search batch ${i + 1}/${batches.length} for ${objectType}`,
+          {
+            error: error.message,
+            batchSize: batch.length,
+            errorBody: error.body,
+            statusCode: error.code,
+          },
+        );
+        console.error(
+          "Full batch search error:",
+          JSON.stringify(error, null, 2),
+        );
+        // Continue with other batches even if one fails
       }
-
-      logger.info(
-        `Found ${results.size} ${objectType} out of ${salesforceIds.length} Salesforce IDs`,
-      );
-    } catch (error: any) {
-      console.error("=== HUBSPOT SEARCH ERROR ===");
-      console.error("Object Type:", objectType);
-      console.error("Salesforce IDs:", salesforceIds);
-      console.error("Property Name:", propertyName);
-      console.error("Error:", error.message);
-      console.error("Error Body:", JSON.stringify(error.body, null, 2));
-      console.error("Error Code:", error.code);
-      console.error("Full Error:", error);
-      console.error("========================");
-
-      logger.error("Failed to bulk search for objects by Salesforce IDs", {
-        objectType,
-        salesforceIdCount: salesforceIds.length,
-        error: error.message,
-        errorBody: error.body,
-        errorCode: error.code,
-      });
     }
+
+    logger.info(
+      `Found ${results.size} ${objectType} out of ${salesforceIds.length} Salesforce IDs`,
+    );
 
     return results;
   }
@@ -853,27 +1085,61 @@ class HubSpotLoader {
 
         // Log detailed error information
         if (error.body) {
+          console.error("=== BATCH CREATE ERROR BODY ===");
+          console.error(JSON.stringify(error.body, null, 2));
+          console.error("================================");
           logger.error(
             "Error body details:",
             JSON.stringify(error.body, null, 2),
           );
+        } else {
+          console.error("=== BATCH CREATE ERROR (no body) ===");
+          console.error("Message:", error.message);
+          console.error("Code:", error.code);
+          console.error("Category:", error.category);
+          console.error("====================================");
         }
 
-        // Try individual creates for this batch
+        // Try individual creates for this batch - INCLUDE ASSOCIATIONS!
         for (const item of batch) {
           try {
             await this.rateLimiter.waitForToken();
-            const result = await this.client.crm.lineItems.basicApi.create({
+
+            const input: any = {
               properties: item.properties,
-            });
+            };
+
+            // Include associations if dealId is provided
+            if (item.dealId) {
+              input.associations = [
+                {
+                  to: { id: item.dealId },
+                  types: [
+                    {
+                      associationCategory: "HUBSPOT_DEFINED",
+                      associationTypeId: 20,
+                    },
+                  ],
+                },
+              ];
+            }
+
+            const result =
+              await this.client.crm.lineItems.basicApi.create(input);
             successful.push({
               salesforceId: item.salesforceId,
               hubspotId: result.id,
             });
           } catch (individualError: any) {
-            failed.push({
+            console.error("Individual line item create failed:", {
               salesforceId: item.salesforceId,
               error: individualError.message,
+              body: individualError.body,
+            });
+            failed.push({
+              salesforceId: item.salesforceId,
+              error:
+                individualError.message || JSON.stringify(individualError.body),
             });
           }
         }
@@ -1178,6 +1444,75 @@ class HubSpotLoader {
       console.error("============================");
 
       logger.error("Failed to list/delete meetings", {
+        error: error.message,
+        errorCode: error.code,
+        errorBody: error.body,
+      });
+      return totalDeleted;
+    }
+  }
+
+  async deleteAllEmails(): Promise<number> {
+    let totalDeleted = 0;
+
+    logger.info("Starting to delete all emails from HubSpot");
+
+    try {
+      // Keep deleting until no more emails exist
+      while (true) {
+        await this.rateLimiter.waitForToken();
+
+        // List emails (real-time, not search index)
+        const listResponse =
+          await this.client.crm.objects.emails.basicApi.getPage(
+            100, // limit
+            undefined, // after (always get first page since we're deleting)
+          );
+
+        const emailIds = listResponse.results.map((item: any) => item.id);
+
+        logger.info(`Found ${emailIds.length} emails to delete`);
+
+        if (emailIds.length === 0) {
+          logger.info("No more emails found, stopping.");
+          break;
+        }
+
+        // Delete in batches
+        const batchSize = 100;
+        for (let i = 0; i < emailIds.length; i += batchSize) {
+          const batch = emailIds.slice(i, i + batchSize);
+
+          await this.rateLimiter.waitForToken();
+
+          try {
+            await this.client.crm.objects.emails.batchApi.archive({
+              inputs: batch.map((id) => ({ id })),
+            });
+            totalDeleted += batch.length;
+            logger.info(
+              `Deleted ${batch.length} emails (total: ${totalDeleted})`,
+            );
+          } catch (error: any) {
+            logger.error("Failed to delete batch of emails", {
+              error: error.message,
+              batchSize: batch.length,
+            });
+          }
+        }
+      }
+
+      logger.info(`✅ Total emails deleted: ${totalDeleted}`);
+      return totalDeleted;
+    } catch (error: any) {
+      console.error("=== DELETE EMAILS ERROR ===");
+      console.error("Error message:", error.message);
+      console.error("Error code:", error.code);
+      console.error("Error body:", JSON.stringify(error.body, null, 2));
+      console.error("Full error:", error);
+      console.error("============================");
+
+      logger.error("Failed to list/delete emails", {
         error: error.message,
         errorCode: error.code,
         errorBody: error.body,

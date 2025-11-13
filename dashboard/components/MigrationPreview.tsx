@@ -18,12 +18,17 @@ type MigrationType =
   | "opportunity_renewal_associations"
   | "pilot_opportunity_associations"
   | "event_to_meeting_migration"
+  | "call_migration_from_excel"
+  | "email_migration_from_excel"
+  | "meeting_migration_from_excel"
+  | "task_migration_from_excel"
   | "opportunity_product_dates"
   | "sync_deal_contract_dates"
   | "opportunity_line_item_dates"
   | "line_items"
   | "cleanup_tasks"
   | "cleanup_meetings"
+  | "cleanup_emails"
   | "cleanup_line_items";
 
 interface MigrationPreviewProps {
@@ -53,14 +58,28 @@ export default function MigrationPreview({
     setError(null);
 
     try {
-      // For cleanup types - no preview needed, just set dummy data
+      // For cleanup types and call/email/meeting migration - no preview needed, just set dummy data
       if (
         migrationType === "cleanup_tasks" ||
         migrationType === "cleanup_meetings" ||
-        migrationType === "cleanup_line_items"
+        migrationType === "cleanup_emails" ||
+        migrationType === "cleanup_line_items" ||
+        migrationType === "call_migration_from_excel" ||
+        migrationType === "email_migration_from_excel" ||
+        migrationType === "meeting_migration_from_excel" ||
+        migrationType === "task_migration_from_excel"
       ) {
         setPreviewData({
-          totalCount: 0,
+          totalCount:
+            migrationType === "call_migration_from_excel"
+              ? 2800
+              : migrationType === "email_migration_from_excel"
+                ? 4500
+                : migrationType === "meeting_migration_from_excel"
+                  ? 1424
+                  : migrationType === "task_migration_from_excel"
+                    ? 53
+                    : 0,
           sampleRecords: [],
         });
         setLoading(false);
@@ -283,6 +302,14 @@ export default function MigrationPreview({
 
   const isEventToMeeting = migrationType === "event_to_meeting_migration";
 
+  const isCallMigration = migrationType === "call_migration_from_excel";
+
+  const isEmailMigration = migrationType === "email_migration_from_excel";
+
+  const isMeetingMigration = migrationType === "meeting_migration_from_excel";
+
+  const isTaskMigration = migrationType === "task_migration_from_excel";
+
   const isOpportunityProductDates =
     migrationType === "opportunity_product_dates";
 
@@ -296,9 +323,11 @@ export default function MigrationPreview({
   const isCleanup =
     migrationType === "cleanup_tasks" ||
     migrationType === "cleanup_meetings" ||
+    migrationType === "cleanup_emails" ||
     migrationType === "cleanup_line_items";
   const isCleanupTasks = migrationType === "cleanup_tasks";
   const isCleanupMeetings = migrationType === "cleanup_meetings";
+  const isCleanupEmails = migrationType === "cleanup_emails";
   const isCleanupLineItems = migrationType === "cleanup_line_items";
 
   return (
@@ -312,23 +341,33 @@ export default function MigrationPreview({
               ? "⚠️ This will permanently delete ALL tasks from HubSpot"
               : isCleanupMeetings
                 ? "⚠️ This will permanently delete ALL meetings from HubSpot"
-                : isCleanupLineItems
-                  ? "⚠️ This will permanently delete ALL line items from HubSpot"
-                  : isAssociationMigration
-                    ? migrationType === "opportunity_renewal_associations"
-                      ? "Review renewal associations that will be created"
-                      : "Review pilot associations that will be created"
-                    : isEventToMeeting
-                      ? "Review Salesforce Events that will be migrated to HubSpot Meetings"
-                      : isOpportunityProductDates
-                        ? "Review Opportunities that will be updated in Salesforce"
-                        : isSyncDealContractDates
-                          ? "Review Opportunities that will sync dates to HubSpot Deals"
-                          : isOpportunityLineItemDates
-                            ? "Review Opportunity Line Items that will be updated in Salesforce"
-                            : isLineItems
-                              ? "Review OpportunityLineItems that will be migrated to HubSpot Deal Line Items"
-                              : "Review what will be migrated"}
+                : isCleanupEmails
+                  ? "⚠️ This will permanently delete ALL emails from HubSpot"
+                  : isCleanupLineItems
+                    ? "⚠️ This will permanently delete ALL line items from HubSpot"
+                    : isAssociationMigration
+                      ? migrationType === "opportunity_renewal_associations"
+                        ? "Review renewal associations that will be created"
+                        : "Review pilot associations that will be created"
+                      : isCallMigration
+                        ? "Review call migration from Excel files to HubSpot"
+                        : isEmailMigration
+                          ? "Review email migration from Excel files to HubSpot"
+                          : isMeetingMigration
+                            ? "Review meeting migration from Excel files to HubSpot"
+                            : isTaskMigration
+                              ? "Review task migration from Excel files to HubSpot"
+                              : isEventToMeeting
+                                ? "Review Salesforce Events that will be migrated to HubSpot Meetings"
+                                : isOpportunityProductDates
+                                  ? "Review Opportunities that will be updated in Salesforce"
+                                  : isSyncDealContractDates
+                                    ? "Review Opportunities that will sync dates to HubSpot Deals"
+                                    : isOpportunityLineItemDates
+                                      ? "Review Opportunity Line Items that will be updated in Salesforce"
+                                      : isLineItems
+                                        ? "Review OpportunityLineItems that will be migrated to HubSpot Deal Line Items"
+                                        : "Review what will be migrated"}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
@@ -349,7 +388,111 @@ export default function MigrationPreview({
           ) : previewData ? (
             <>
               {/* Stats */}
-              {isCleanup ? (
+              {isCallMigration ? (
+                <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Excel Files</p>
+                    <p className="text-2xl font-bold text-primary">3</p>
+                    <p className="text-xs text-muted-foreground">
+                      Source files (~5,455 rows)
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">
+                      Unique Calls
+                    </p>
+                    <p className="text-2xl font-bold text-green-400">
+                      ~{previewData.totalCount}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      To create in HubSpot
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Est. Time</p>
+                    <p className="text-2xl font-bold">{estimatedTime}</p>
+                    <p className="text-xs text-muted-foreground">Minutes</p>
+                  </div>
+                </div>
+              ) : isEmailMigration ? (
+                <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Excel Files</p>
+                    <p className="text-2xl font-bold text-primary">3</p>
+                    <p className="text-xs text-muted-foreground">
+                      Source files (~9,321 rows)
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">
+                      Unique Emails
+                    </p>
+                    <p className="text-2xl font-bold text-green-400">
+                      ~{previewData.totalCount}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      To create in HubSpot
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Est. Time</p>
+                    <p className="text-2xl font-bold">{estimatedTime}</p>
+                    <p className="text-xs text-muted-foreground">Minutes</p>
+                  </div>
+                </div>
+              ) : isMeetingMigration ? (
+                <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Excel Files</p>
+                    <p className="text-2xl font-bold text-primary">3</p>
+                    <p className="text-xs text-muted-foreground">
+                      Source files (~3,155 rows)
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">
+                      Unique Meetings
+                    </p>
+                    <p className="text-2xl font-bold text-green-400">
+                      ~{previewData.totalCount}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      To create in HubSpot
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Est. Time</p>
+                    <p className="text-2xl font-bold">{estimatedTime}</p>
+                    <p className="text-xs text-muted-foreground">Minutes</p>
+                  </div>
+                </div>
+              ) : isTaskMigration ? (
+                <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Excel Files</p>
+                    <p className="text-2xl font-bold text-primary">3</p>
+                    <p className="text-xs text-muted-foreground">
+                      Source files (~110 rows)
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">
+                      Unique Tasks
+                    </p>
+                    <p className="text-2xl font-bold text-green-400">
+                      ~{previewData.totalCount}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      To create in HubSpot
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">Est. Time</p>
+                    <p className="text-2xl font-bold">{estimatedTime}</p>
+                    <p className="text-xs text-muted-foreground">Minutes</p>
+                  </div>
+                </div>
+              ) : isCleanup ? (
                 <div className="rounded-lg border-2 border-red-500 bg-red-500/10 p-6">
                   <h3 className="text-lg font-semibold text-red-600">
                     ⚠️ Warning: Destructive Operation
@@ -367,6 +510,13 @@ export default function MigrationPreview({
                       <li className="flex items-center gap-2">
                         <span className="text-red-500">•</span>
                         <span className="font-semibold">ALL Meetings</span> from
+                        HubSpot
+                      </li>
+                    )}
+                    {isCleanupEmails && (
+                      <li className="flex items-center gap-2">
+                        <span className="text-red-500">•</span>
+                        <span className="font-semibold">ALL Emails</span> from
                         HubSpot
                       </li>
                     )}
@@ -584,7 +734,215 @@ export default function MigrationPreview({
               )}
 
               {/* Field Mappings or Association Details */}
-              {isCleanup ? (
+              {isCallMigration ? (
+                <div>
+                  <h3 className="mb-3 font-semibold">Migration Details</h3>
+                  <div className="space-y-3 rounded-md border p-4">
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Source</Badge>
+                      <div>
+                        <p className="font-semibold">Excel Files (3 files)</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Calls - Contacts, Accounts, Opportunities
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Processing</Badge>
+                      <div className="text-sm">
+                        <p className="font-semibold">
+                          Deduplication & Grouping
+                        </p>
+                        <ul className="mt-1 space-y-1 text-muted-foreground">
+                          <li>• Groups calls by Activity ID</li>
+                          <li>
+                            • Same call in multiple files = 1 call with multiple
+                            associations
+                          </li>
+                          <li>• ~5,455 rows → ~2,800 unique calls</li>
+                        </ul>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Associations</Badge>
+                      <div className="text-sm">
+                        <p className="font-semibold">HubSpot Associations</p>
+                        <ul className="mt-1 space-y-1 text-muted-foreground">
+                          <li>• Call → Contact (Type ID: 194)</li>
+                          <li>• Call → Company (Type ID: 182)</li>
+                          <li>• Call → Deal (Type ID: 206)</li>
+                        </ul>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Owner Mapping</Badge>
+                      <div>
+                        <p className="font-semibold">Owner Assignment</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Maps owner names to HubSpot owners, falls back to Sean
+                          Merat if not found
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : isEmailMigration ? (
+                <div>
+                  <h3 className="mb-3 font-semibold">Migration Details</h3>
+                  <div className="space-y-3 rounded-md border p-4">
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Source</Badge>
+                      <div>
+                        <p className="font-semibold">Excel Files (3 files)</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Emails - Contacts, Accounts, Opportunities
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Processing</Badge>
+                      <div className="text-sm">
+                        <p className="font-semibold">
+                          Deduplication & Grouping
+                        </p>
+                        <ul className="mt-1 space-y-1 text-muted-foreground">
+                          <li>• Groups emails by Activity ID</li>
+                          <li>
+                            • Same email in multiple files = 1 email with
+                            multiple associations
+                          </li>
+                          <li>• ~9,321 rows → ~4,500 unique emails</li>
+                        </ul>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Associations</Badge>
+                      <div className="text-sm">
+                        <p className="font-semibold">HubSpot Associations</p>
+                        <ul className="mt-1 space-y-1 text-muted-foreground">
+                          <li>• Email → Contact (Type ID: 198)</li>
+                          <li>• Email → Company (Type ID: 186)</li>
+                          <li>• Email → Deal (Type ID: 210)</li>
+                        </ul>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Owner Mapping</Badge>
+                      <div>
+                        <p className="font-semibold">Owner Assignment</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Maps owner names to HubSpot owners, falls back to Sean
+                          Merat if not found
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : isMeetingMigration ? (
+                <div>
+                  <h3 className="mb-3 font-semibold">Migration Details</h3>
+                  <div className="space-y-3 rounded-md border p-4">
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Source</Badge>
+                      <div>
+                        <p className="font-semibold">Excel Files (3 files)</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Meetings - Contacts, Accounts, Opportunities
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Processing</Badge>
+                      <div className="text-sm">
+                        <p className="font-semibold">
+                          Deduplication & Grouping
+                        </p>
+                        <ul className="mt-1 space-y-1 text-muted-foreground">
+                          <li>• Groups meetings by Activity ID</li>
+                          <li>
+                            • Same meeting in multiple files = 1 meeting with
+                            multiple associations
+                          </li>
+                          <li>• ~3,155 rows → ~1,424 unique meetings</li>
+                        </ul>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Associations</Badge>
+                      <div className="text-sm">
+                        <p className="font-semibold">HubSpot Associations</p>
+                        <ul className="mt-1 space-y-1 text-muted-foreground">
+                          <li>• Meeting → Contact (Type ID: 200)</li>
+                          <li>• Meeting → Company (Type ID: 188)</li>
+                          <li>• Meeting → Deal (Type ID: 212)</li>
+                        </ul>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Owner Mapping</Badge>
+                      <div>
+                        <p className="font-semibold">Owner Assignment</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Maps owner names to HubSpot owners, falls back to Sean
+                          Merat if not found
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : isTaskMigration ? (
+                <div>
+                  <h3 className="mb-3 font-semibold">Migration Details</h3>
+                  <div className="space-y-3 rounded-md border p-4">
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Source</Badge>
+                      <div>
+                        <p className="font-semibold">Excel Files (3 files)</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Tasks - Contacts, Accounts, Opportunities
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Processing</Badge>
+                      <div className="text-sm">
+                        <p className="font-semibold">
+                          Deduplication & Grouping
+                        </p>
+                        <ul className="mt-1 space-y-1 text-muted-foreground">
+                          <li>• Groups tasks by Activity ID</li>
+                          <li>
+                            • Same task in multiple files = 1 task with multiple
+                            associations
+                          </li>
+                          <li>• ~110 rows → ~53 unique tasks</li>
+                        </ul>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Associations</Badge>
+                      <div className="text-sm">
+                        <p className="font-semibold">HubSpot Associations</p>
+                        <ul className="mt-1 space-y-1 text-muted-foreground">
+                          <li>• Task → Contact (Type ID: 204)</li>
+                          <li>• Task → Company (Type ID: 192)</li>
+                          <li>• Task → Deal (Type ID: 216)</li>
+                        </ul>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <Badge variant="outline">Owner Mapping</Badge>
+                      <div>
+                        <p className="font-semibold">Owner Assignment</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Maps owner names to HubSpot owners, falls back to Sean
+                          Merat if not found
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : isCleanup ? (
                 <div>
                   <h3 className="mb-3 font-semibold">Operation Details</h3>
                   <div className="space-y-3 rounded-md border border-red-500/50 p-4">
@@ -622,6 +980,25 @@ export default function MigrationPreview({
                           <p className="mt-1 text-sm text-muted-foreground">
                             Searches for all meetings in HubSpot and deletes
                             them in batches of 100
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                    {isCleanupEmails && (
+                      <div className="flex items-start gap-3">
+                        <Badge
+                          variant="outline"
+                          className="border-red-500 text-red-600"
+                        >
+                          Emails
+                        </Badge>
+                        <div>
+                          <p className="font-semibold">
+                            Delete All HubSpot Emails
+                          </p>
+                          <p className="mt-1 text-sm text-muted-foreground">
+                            Searches for all emails in HubSpot and deletes them
+                            in batches of 100
                           </p>
                         </div>
                       </div>

@@ -31,6 +31,7 @@ export interface OwnerMapping {
 
 class OwnerMapperService {
   private ownerCache: Map<string, string> = new Map(); // SF User ID -> HS Owner ID
+  private ownerNameCache: Map<string, string> = new Map(); // Owner Name -> HS Owner ID (for name-based lookup)
   private runId: string | null = null;
   private initialized: boolean = false;
   private defaultOwnerId: string | null = null; // Default owner for unmapped users
@@ -50,6 +51,7 @@ class OwnerMapperService {
     logger.info("Initializing owner mapper...");
     this.runId = runId;
     this.ownerCache.clear();
+    this.ownerNameCache.clear();
 
     try {
       // Fetch Salesforce Users
@@ -287,6 +289,62 @@ class OwnerMapperService {
     }
 
     return hsOwnerId;
+  }
+
+  /**
+   * Get HubSpot owner ID by owner name (for Excel migration)
+   */
+  async getHubSpotOwnerIdByName(ownerName: string): Promise<string | null> {
+    if (!ownerName) return this.defaultOwnerId;
+
+    const normalizedSearchName = ownerName.toLowerCase().trim();
+
+    // Check cache first
+    if (this.ownerNameCache.has(normalizedSearchName)) {
+      return this.ownerNameCache.get(normalizedSearchName)!;
+    }
+
+    try {
+      const client = new Client({
+        accessToken: config.hubspot.accessToken,
+      });
+
+      const response = await client.crm.owners.ownersApi.getPage();
+
+      // Search for owner by name
+      for (const owner of response.results) {
+        const fullName = `${owner.firstName || ""} ${owner.lastName || ""}`
+          .toLowerCase()
+          .trim();
+        const email = (owner.email || "").toLowerCase();
+
+        // Match by full name or email
+        if (
+          fullName === normalizedSearchName ||
+          email.includes(normalizedSearchName)
+        ) {
+          logger.debug("Found HubSpot owner by name", {
+            searchName: ownerName,
+            foundOwner: `${owner.firstName} ${owner.lastName}`,
+            ownerId: owner.id,
+          });
+          // Cache the result
+          this.ownerNameCache.set(normalizedSearchName, owner.id);
+          return owner.id;
+        }
+      }
+
+      logger.debug("No HubSpot owner found by name", { ownerName });
+      // Cache the fallback
+      this.ownerNameCache.set(normalizedSearchName, this.defaultOwnerId!);
+      return this.defaultOwnerId;
+    } catch (error: any) {
+      logger.error("Failed to search HubSpot owner by name", {
+        ownerName,
+        error: error.message,
+      });
+      return this.defaultOwnerId;
+    }
   }
 
   /**
